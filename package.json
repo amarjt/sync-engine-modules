@@ -1,0 +1,19 @@
+{
+  "name": "sync-engine-modules",
+  "version": "1.0.0",
+  "description": "Curated collection of modules for Obsidian Sync Engine",
+  "main": "modules.json",
+  "scripts": {
+    "build": "node scripts/build-catalog.js",
+    "test": "node -c modules/drive-attachments.js && node -c modules/workflow-manager.js"
+  },
+  "keywords": [
+    "obsidian",
+    "sync-engine",
+    "modules",
+    "google-drive",
+    "workflow-manager"
+  ],
+  "author": "amarjt",
+  "license": "MIT"
+}
