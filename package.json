@@ -4,6 +4,7 @@
   "description": "Curated collection of modules for Obsidian Sync Engine",
   "main": "modules.json",
   "scripts": {
+    "dev": "node scripts/build-catalog.js",
     "build": "node scripts/build-catalog.js",
     "test": "node -c modules/drive-attachments.js && node -c modules/workflow-manager.js"
   },

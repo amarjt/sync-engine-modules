@@ -52,8 +52,11 @@ for (const file of files) {
     }
   }
 
+  // Normalize line endings to LF before hashing so hash matches Git raw endpoints exactly
+  const normalizedContent = content.replace(/\r\n/g, '\n');
+
   // Calculate SHA-256 integrity hash (exact format expected by Sync Engine)
-  const hash = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+  const hash = crypto.createHash('sha256').update(normalizedContent, 'utf8').digest('hex');
 
   const entry = {
     id: meta.id || id,

@@ -239,6 +239,130 @@ class EditModuleModal extends Modal {
   }
 }
 
+class StandaloneModuleSettingModal extends (Modal || class {}) {
+  constructor(app, moduleItem, settingTab) {
+    super(app);
+    this.moduleItem = moduleItem || {};
+    this.settingTab = settingTab;
+  }
+
+  onOpen() {
+    const { contentEl, modalEl } = this;
+    contentEl.empty();
+    if (modalEl) {
+      modalEl.addClass("mod-module-settings");
+      modalEl.style.width = "85vw";
+      modalEl.style.maxWidth = "960px";
+      modalEl.style.minHeight = "480px";
+      modalEl.style.maxHeight = "85vh";
+      modalEl.style.display = "flex";
+      modalEl.style.flexDirection = "column";
+    }
+    contentEl.addClass("module-settings-modal-content");
+    contentEl.style.display = "flex";
+    contentEl.style.flexDirection = "column";
+    contentEl.style.flex = "1";
+    contentEl.style.overflow = "hidden";
+    contentEl.style.padding = "16px 24px";
+
+    // Header section
+    const header = contentEl.createDiv("module-settings-modal-header");
+    header.style.display = "flex";
+    header.style.justifyContent = "space-between";
+    header.style.alignItems = "center";
+    header.style.paddingBottom = "12px";
+    header.style.marginBottom = "14px";
+    header.style.borderBottom = "1px solid var(--background-modifier-border)";
+
+    const titleGroup = header.createDiv("module-settings-modal-title-group");
+    const h2 = titleGroup.createEl("h2", {
+      text: (this.moduleItem.name || this.moduleItem.id || "Module") + " Settings"
+    });
+    h2.style.margin = "0 0 4px 0";
+
+    const badgeLine = titleGroup.createDiv("module-settings-modal-badge-line");
+    badgeLine.style.display = "flex";
+    badgeLine.style.gap = "8px";
+    badgeLine.style.alignItems = "center";
+
+    const tagBadge = badgeLine.createSpan({
+      cls: "manager-stat-pill is-accent",
+      text: "Sync Engine Module"
+    });
+    tagBadge.style.fontSize = "11px";
+
+    if (this.moduleItem.version) {
+      const verBadge = badgeLine.createSpan({
+        cls: "manager-stat-pill",
+        text: "v" + this.moduleItem.version
+      });
+      verBadge.style.fontSize = "11px";
+    }
+
+    const subtitle = badgeLine.createSpan({
+      text: "Autonomous standalone settings, independent of Community Plugins"
+    });
+    subtitle.style.fontSize = "12px";
+    subtitle.style.color = "var(--text-muted)";
+
+    const actions = header.createDiv("module-settings-modal-actions");
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+
+    if (this.app?.setting?.open) {
+      const openNativeBtn = actions.createEl("button", {
+        cls: "manager-action-btn",
+        text: "Open in Obsidian Settings"
+      });
+      openNativeBtn.style.fontSize = "12px";
+      openNativeBtn.addEventListener("click", () => {
+        this.close();
+        try {
+          this.app.setting.open();
+          if (this.app.setting.openTabById) {
+            this.app.setting.openTabById(this.moduleItem.id);
+          }
+        } catch (_) {}
+      });
+    }
+
+    // Scrollable content area for settings
+    const bodyEl = contentEl.createDiv("vertical-tab-content mod-settings module-settings-scroll-area");
+    bodyEl.style.flex = "1";
+    bodyEl.style.overflowY = "auto";
+    bodyEl.style.padding = "0 8px 16px 0";
+
+    if (this.settingTab) {
+      try {
+        this.settingTab.containerEl = bodyEl;
+        if (typeof this.settingTab.display === "function") {
+          this.settingTab.display();
+        }
+      } catch (err) {
+        console.error("[StandaloneModuleSettingModal] Error executing settingTab.display():", err);
+        const errBox = bodyEl.createDiv("module-settings-error");
+        errBox.createEl("p", { cls: "mod-warning", text: "Error displaying module settings: " + err.message });
+      }
+    } else {
+      const emptyBox = bodyEl.createDiv("module-settings-empty");
+      emptyBox.style.padding = "24px";
+      emptyBox.style.textAlign = "center";
+      emptyBox.createEl("p", { text: "No settings tab is currently available for this module." });
+      emptyBox.createEl("p", {
+        cls: "mod-muted",
+        text: "Ensure the module is enabled in Workflow & Plugin Manager."
+      });
+    }
+  }
+
+  onClose() {
+    if (this.settingTab && typeof this.settingTab.hide === "function") {
+      try { this.settingTab.hide(); } catch (_) {}
+    }
+    this.contentEl.empty();
+  }
+}
+
 // -------------------------------------------------------------
 // Reusable Better Manager Dashboard Component
 // Mounts into either a Standalone Popout Window (ItemView) or Modal
@@ -350,6 +474,65 @@ class WorkflowManagerDashboardRenderer {
       } catch (_) {}
     }
 
+    // 1. Locate module item metadata
+    let moduleItem = { id };
+    if (this.module?.ctx?.discoveredModules?.has(id)) {
+      moduleItem = this.module.ctx.discoveredModules.get(id);
+    } else if (this.app?.plugins?.manifests?.[id]) {
+      moduleItem = this.app.plugins.manifests[id];
+    }
+
+    // 2. Locate module settingTab
+    let settingTab = null;
+
+    // Check settingTabs or pluginTabs in app.setting
+    if (this.app?.setting) {
+      settingTab = this.app.setting.pluginTabs?.find((t) => t && (t.id === id || t.plugin?.manifest?.id === id))
+        || this.app.setting.settingTabs?.find((t) => t && (t.id === id || t.id === "module:" + id));
+    }
+
+    // Check window registry
+    if (!settingTab && typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__?.[id]) {
+      settingTab = window.__syncEngineModuleSettingTabs__[id];
+    }
+
+    // Check loaded module instance in Sync Engine
+    if (!settingTab && this.module?.ctx?.loadedModules?.has(id)) {
+      const loaded = this.module.ctx.loadedModules.get(id);
+      const inst = this.module.ctx.__getModule__ ? this.module.ctx.__getModule__(loaded) : loaded;
+      if (inst) {
+        settingTab = inst.settingTab || inst.instance?.settingTab;
+      }
+    }
+
+    // Check active plugin instance if any
+    if (!settingTab && this.app?.plugins?.plugins?.[id]?.settingTab) {
+      settingTab = this.app.plugins.plugins[id].settingTab;
+    }
+
+    // 3. If community plugin manifest exists AND is enabled in community plugins, try opening native setting tab
+    const isCommunityPlugin = Boolean(this.app?.plugins?.manifests?.[id] && this.app?.plugins?.enabledPlugins?.has(id));
+    if (isCommunityPlugin && this.app?.setting?.open) {
+      try {
+        this.app.setting.open();
+        const tab = this.app.setting.openTabById ? this.app.setting.openTabById(id) : null;
+        if (tab) return;
+      } catch (err) {
+        console.warn("[WorkflowManager] Failed to open native plugin tab for " + id + ":", err);
+      }
+    }
+
+    // 4. For Converted Modules (or when native tab did not open), launch StandaloneModuleSettingModal!
+    if (settingTab) {
+      try {
+        new StandaloneModuleSettingModal(this.app, moduleItem, settingTab).open();
+        return;
+      } catch (err) {
+        console.error("[WorkflowManager] Failed to open StandaloneModuleSettingModal for " + id + ":", err);
+      }
+    }
+
+    // 5. Fallback: try opening via Obsidian settings dialog
     if (this.app?.setting?.open) {
       try {
         this.app.setting.open();
@@ -745,8 +928,10 @@ class WorkflowManagerDashboardRenderer {
 
         // 2. Settings button (if module has settings tab or is registered in Obsidian)
         const hasModuleSettings = Boolean(
-          this.app.setting?.pluginTabs?.some((t) => t.id === item.id) ||
-          this.app.setting?.settingTabs?.some((t) => t.id === item.id) ||
+          this.app.setting?.pluginTabs?.some((t) => t && (t.id === item.id || t.plugin?.manifest?.id === item.id)) ||
+          this.app.setting?.settingTabs?.some((t) => t && (t.id === item.id || t.id === "module:" + item.id)) ||
+          (typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__?.[item.id]) ||
+          this.module?.ctx?.loadedModules?.has(item.id) ||
           this.app.plugins?.plugins?.[item.id] !== undefined
         );
         if (hasModuleSettings) {
@@ -988,8 +1173,10 @@ class WorkflowManagerDashboardRenderer {
 
         // 3. Settings gear
         const hasPluginSettings = Boolean(
-          this.app.setting?.pluginTabs?.some((t) => t.id === item.id) ||
-          this.app.setting?.settingTabs?.some((t) => t.id === item.id) ||
+          this.app.setting?.pluginTabs?.some((t) => t && (t.id === item.id || t.plugin?.manifest?.id === item.id)) ||
+          this.app.setting?.settingTabs?.some((t) => t && (t.id === item.id || t.id === "module:" + item.id)) ||
+          (typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__?.[item.id]) ||
+          this.module?.ctx?.loadedModules?.has(item.id) ||
           this.app.plugins?.plugins?.[item.id] !== undefined
         );
         let settingBtn = null;
@@ -2949,16 +3136,41 @@ class ConvertedModule {
 
     try {
       const pluginId = ${JSON.stringify(pluginId)};
-      const pluginDir = \`\${this.app.vault.configDir}/plugins/${pluginId}\`;
+      const moduleDataDir = \`\${this.app.vault.configDir}/plugins/sync-engine/module-data/\${pluginId}\`;
+
+      // 0. Ensure isolated module storage directory exists
+      if (!(await this.app.vault.adapter.exists(moduleDataDir))) {
+        await this.app.vault.adapter.mkdir(moduleDataDir);
+      }
+
+      // Seamless migration: If old community plugin directory has data.json or icons.json, migrate them
+      const oldPluginDir = \`\${this.app.vault.configDir}/plugins/\${pluginId}\`;
+      const oldDataJsonPath = \`\${oldPluginDir}/data.json\`;
+      const dataJsonPath = \`\${moduleDataDir}/data.json\`;
+      try {
+        if (await this.app.vault.adapter.exists(oldDataJsonPath) && !(await this.app.vault.adapter.exists(dataJsonPath))) {
+          const oldData = await this.app.vault.adapter.read(oldDataJsonPath);
+          await this.app.vault.adapter.write(dataJsonPath, oldData);
+        }
+      } catch (_) {}
+
+      try {
+        const oldIconsJson = \`\${oldPluginDir}/icons.json\`;
+        const newIconsJson = \`\${moduleDataDir}/icons.json\`;
+        if (await this.app.vault.adapter.exists(oldIconsJson) && !(await this.app.vault.adapter.exists(newIconsJson))) {
+          const iconsData = await this.app.vault.adapter.read(oldIconsJson);
+          await this.app.vault.adapter.write(newIconsJson, iconsData);
+        }
+      } catch (_) {}
+
       const manifest = {
         ...${JSON.stringify(manifest)},
-        dir: pluginDir
+        dir: moduleDataDir
       };
 
       this.instance = new OriginalPluginClass(this.app, manifest);
 
-      // 1. Resilient loadData / saveData proxying
-      const dataJsonPath = \`\${pluginDir}/data.json\`;
+      // 1. Resilient loadData / saveData proxying pointing to self-contained module storage
       const origLoadData = typeof this.instance.loadData === "function" ? this.instance.loadData.bind(this.instance) : null;
       this.instance.loadData = async () => {
         try {
@@ -2967,7 +3179,7 @@ class ConvertedModule {
             return JSON.parse(raw);
           }
         } catch (e) {
-          console.warn("[ConvertedModule:${pluginId}] Custom loadData read:", e);
+          console.warn("[ConvertedModule:\${pluginId}] Custom loadData read:", e);
         }
         if (origLoadData) {
           try {
@@ -2980,9 +3192,12 @@ class ConvertedModule {
       const origSaveData = typeof this.instance.saveData === "function" ? this.instance.saveData.bind(this.instance) : null;
       this.instance.saveData = async (data) => {
         try {
+          if (!(await this.app.vault.adapter.exists(moduleDataDir))) {
+            await this.app.vault.adapter.mkdir(moduleDataDir);
+          }
           await this.app.vault.adapter.write(dataJsonPath, JSON.stringify(data, null, 2));
         } catch (e) {
-          console.warn("[ConvertedModule:${pluginId}] Custom saveData write:", e);
+          console.warn("[ConvertedModule:\${pluginId}] Custom saveData write:", e);
         }
         if (origSaveData) {
           try {
@@ -2991,22 +3206,26 @@ class ConvertedModule {
         }
       };
 
-      // 2. Register instance into app.plugins so setting tabs, commands, and Obsidian plugin manager recognize it
+      // 2. Safe app.plugins integration without polluting manifests or Community Plugins list
       if (this.app.plugins) {
-        if (!this.app.plugins.plugins) this.app.plugins.plugins = {};
-        this.app.plugins.plugins[pluginId] = this.instance;
-        if (!this.app.plugins.manifests) this.app.plugins.manifests = {};
-        if (!this.app.plugins.manifests[pluginId]) {
-          this.app.plugins.manifests[pluginId] = manifest;
+        // Ensure community plugin is not running simultaneously
+        if (this.app.plugins.enabledPlugins && typeof this.app.plugins.enabledPlugins.delete === "function") {
+          this.app.plugins.enabledPlugins.delete(pluginId);
         }
-        this.cleanups.push(() => {
-          if (this.app.plugins.plugins[pluginId] === this.instance) {
-            delete this.app.plugins.plugins[pluginId];
-          }
-        });
+        // Proxy app.plugins.getPlugin so dependent plugins/commands can access this.instance safely
+        const origGetPlugin = typeof this.app.plugins.getPlugin === "function" ? this.app.plugins.getPlugin.bind(this.app.plugins) : null;
+        if (origGetPlugin) {
+          this.app.plugins.getPlugin = (id) => {
+            if (id === pluginId) return this.instance;
+            return origGetPlugin(id);
+          };
+          this.cleanups.push(() => {
+            if (this.app.plugins) this.app.plugins.getPlugin = origGetPlugin;
+          });
+        }
       }
 
-      // 0. Setting tab deduplication helper
+      // 3. Setting tab deduplication helper
       const purgeSettingTabs = () => {
         if (!this.app.setting) return;
         const targetId = ${JSON.stringify(pluginId)};
@@ -3034,25 +3253,53 @@ class ConvertedModule {
       // Clean up any stale leftover tabs from prior sessions
       purgeSettingTabs();
 
-      // 3. Intercept addSettingTab to enforce single-tab invariant and ensure clean teardown
+      // 4. Intercept addSettingTab to enforce standalone registration and single-tab invariant
       const origAddSettingTab = this.instance.addSettingTab?.bind(this.instance);
       if (origAddSettingTab) {
         this.instance.addSettingTab = (settingTab) => {
           if (!settingTab.id) settingTab.id = ${JSON.stringify(pluginId)};
+          settingTab.name = manifest.name;
+          this.instance.settingTab = settingTab;
+          this.settingTab = settingTab;
+
+          // Register in window registry for immediate access by StandaloneModuleSettingModal
+          if (typeof window !== "undefined") {
+            if (!window.__syncEngineModuleSettingTabs__) window.__syncEngineModuleSettingTabs__ = {};
+            window.__syncEngineModuleSettingTabs__[pluginId] = settingTab;
+          }
+
           // Purge any pre-existing duplicate before adding
           purgeSettingTabs();
           origAddSettingTab(settingTab);
+          if (this.app.setting) {
+            if (Array.isArray(this.app.setting.pluginTabs) && !this.app.setting.pluginTabs.includes(settingTab)) {
+              this.app.setting.pluginTabs.push(settingTab);
+            }
+            if (typeof this.app.setting.updatePluginSection === "function") {
+              try { this.app.setting.updatePluginSection(); } catch (_) {}
+            }
+          }
           this.cleanups.push(() => {
             purgeSettingTabs();
+            if (this.instance) this.instance.settingTab = null;
+            this.settingTab = null;
+            if (typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__) {
+              delete window.__syncEngineModuleSettingTabs__[pluginId];
+            }
           });
         };
       }
 
-      // 4. Proper Component Lifecycle Load
+      // 5. Proper Component Lifecycle Load
       if (typeof this.instance.load === "function") {
         await this.instance.load();
       } else if (typeof this.instance.onload === "function") {
         await this.instance.onload();
+      }
+
+      // Refresh setting sidebar if settings dialog is open
+      if (this.app.setting && typeof this.app.setting.updatePluginSection === "function") {
+        try { this.app.setting.updatePluginSection(); } catch (_) {}
       }
 
       console.log("[ConvertedModule] Successfully loaded converted module " + ${JSON.stringify(pluginId)});
@@ -3080,6 +3327,10 @@ class ConvertedModule {
       try { cleanup(); } catch (_) {}
     }
     this.cleanups.length = 0;
+
+    if (typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__) {
+      delete window.__syncEngineModuleSettingTabs__[${JSON.stringify(pluginId)}];
+    }
 
     // Force purge any lingering setting tabs on dispose
     if (this.app.setting && Array.isArray(this.app.setting.pluginTabs)) {

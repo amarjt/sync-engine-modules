@@ -7,7 +7,7 @@
     "icon": "paperclip",
     "main": "https://raw.githubusercontent.com/amarjt/sync-engine-modules/main/modules/drive-attachments.js",
     "minPluginVersion": "3.3.0",
-    "integrity": "b201bfdab03a14c3bfbdf8a9e3b3633a20b9a5a630143cde330a1e93eda9e857",
+    "integrity": "71f6081297db170be38225ecb469d21bf15341d65f28965a7b0ccb138b7e94ce",
     "readme": "https://sync.consensia.cc/"
   },
   {
@@ -18,7 +18,7 @@
     "icon": "layout-grid",
     "main": "https://raw.githubusercontent.com/amarjt/sync-engine-modules/main/modules/workflow-manager.js",
     "minPluginVersion": "3.3.0",
-    "integrity": "4d7dce48c4f100a4385bae833c0a732277d42e16431ed45407c21f05c6628152",
+    "integrity": "b74058d464cc115a35e60ae269bc0094072df4f9e7ba48d2a6260673629aa443",
     "readme": "https://github.com/amarjt/sync-engine-modules"
   }
 ]
