@@ -2,7 +2,7 @@
 name: Bases Visuals & Pagination
 icon: layout-grid
 description: Enhances Obsidian Bases with community Bases Visuals integration, universal View Tabs for standalone & embedded bases, right-tools collapse toggle, and interactive record pagination.
-version: 1.2.1
+version: 1.2.2
 readme: https://github.com/amarjt/sync-engine-modules
 */
 
@@ -849,6 +849,9 @@ class BasesVisualsHost {
     // Hook Bases DataClass (cG) prototype to execute immediate pagination
     this.hookBasesDataClass();
 
+    // Hook delegated JIT hover & click handlers for cancel/clear buttons
+    this.setupInteractivity();
+
     // Hook view-changed event from Bases controller
     if (controller.events?.on) {
       const ref = controller.events.on("view-changed", () => {
@@ -857,9 +860,9 @@ class BasesVisualsHost {
         this.hookView();
         this.renderTabs();
         this.syncToolbarTools();
-        this.updatePaginationBar();
+        this.requestUpdatePaginationBar();
         this.triggerCommunityBasesVisualsEnhancer();
-        this.processSelectCells();
+        this.setupInteractivity();
       });
       this.cleanups.push(() => controller.events.offref?.(ref));
     }
@@ -871,65 +874,86 @@ class BasesVisualsHost {
     // Initial mount
     this.renderTabs();
     this.syncToolbarTools();
-    this.updatePaginationBar();
+    this.requestUpdatePaginationBar();
     this.triggerCommunityBasesVisualsEnhancer();
   }
 
-  // Trigger Community "Bases Visuals" (bases-pill-colors) enhancer on this view
-  
-  // Cancel button support for all list items, multi-select pills, and single-select cells
-  processPillsAndListCells() {
+  // Delegated, Just-In-Time (JIT) interactivity: inject cancel/clear buttons on hover without heavy DOM traversals
+  setupInteractivity() {
     const container = this.controller.viewContainerEl;
-    if (!container) return;
+    if (!container || this._interactivityAttached) return;
+    this._interactivityAttached = true;
 
-    // 1. Process all pills in lists (multi-select, tags, bpc pills, metadata pills)
-    const pills = container.querySelectorAll(
-      ".multi-select-pill, .bpc-pill, .metadata-property-pill, .bases-cell-list-item"
-    );
+    // Delegated mouseover: inject cancel/clear buttons just-in-time on hover
+    const handleMouseOver = (e) => {
+      const target = e.target;
+      if (!target || !target.closest) return;
 
-    for (const pill of Array.from(pills)) {
-      if (pill.querySelector(".multi-select-pill-remove-button, .bases-pill-cancel-btn")) {
-        continue;
+      const pill = target.closest(
+        ".multi-select-pill, .bpc-pill, .metadata-property-pill, .bases-cell-list-item"
+      );
+      if (pill && !pill.querySelector(".multi-select-pill-remove-button, .bases-pill-cancel-btn")) {
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "multi-select-pill-remove-button bases-pill-cancel-btn clickable-icon";
+        cancelBtn.setAttribute("aria-label", "Remove from list");
+        cancelBtn.title = "Remove from list";
+        if (setIcon) setIcon(cancelBtn, "lucide-x"); else cancelBtn.setText("×");
+        pill.appendChild(cancelBtn);
       }
 
-      const cancelBtn = document.createElement("button");
-      cancelBtn.type = "button";
-      cancelBtn.className = "multi-select-pill-remove-button bases-pill-cancel-btn clickable-icon";
-      cancelBtn.setAttribute("aria-label", "Remove from list");
-      cancelBtn.title = "Remove from list";
-      if (setIcon) setIcon(cancelBtn, "lucide-x"); else cancelBtn.setText("×");
-
-      cancelBtn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await this.removeListItem(pill);
-      });
-
-      pill.appendChild(cancelBtn);
-    }
-
-    // 2. Process single-select cells
-    const cells = container.querySelectorAll(".bpc-select-cell");
-    for (const cell of Array.from(cells)) {
-      if (!cell.querySelector(".bpc-select-clear-btn") && (cell.dataset.bpcKey || cell.textContent?.trim())) {
+      const cell = target.closest(".bpc-select-cell");
+      if (cell && !cell.querySelector(".bpc-select-clear-btn") && (cell.dataset?.bpcKey || cell.textContent?.trim())) {
         const clearBtn = document.createElement("button");
         clearBtn.type = "button";
         clearBtn.className = "bpc-select-clear-btn clickable-icon";
         clearBtn.setAttribute("aria-label", "Clear value");
         clearBtn.title = "Clear value";
         if (setIcon) setIcon(clearBtn, "lucide-x"); else clearBtn.setText("×");
-        clearBtn.addEventListener("click", async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          await this.clearSingleSelectCell(cell);
-        });
         cell.appendChild(clearBtn);
       }
-    }
+    };
+
+    // Delegated click: handle removals
+    const handleClick = async (e) => {
+      const target = e.target;
+      if (!target || !target.closest) return;
+
+      const cancelBtn = target.closest(".bases-pill-cancel-btn");
+      if (cancelBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const pill = cancelBtn.closest(".multi-select-pill, .bpc-pill, .metadata-property-pill, .bases-cell-list-item");
+        if (pill) await this.removeListItem(pill);
+        return;
+      }
+
+      const clearBtn = target.closest(".bpc-select-clear-btn");
+      if (clearBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const cell = clearBtn.closest(".bpc-select-cell");
+        if (cell) await this.clearSingleSelectCell(cell);
+        return;
+      }
+    };
+
+    container.addEventListener("mouseover", handleMouseOver, { passive: true });
+    container.addEventListener("click", handleClick, true);
+
+    this.cleanups.push(() => {
+      container.removeEventListener("mouseover", handleMouseOver);
+      container.removeEventListener("click", handleClick, true);
+      this._interactivityAttached = false;
+    });
+  }
+
+  processPillsAndListCells() {
+    this.setupInteractivity();
   }
 
   processSelectCells() {
-    this.processPillsAndListCells();
+    this.setupInteractivity();
   }
 
   async removeListItem(pill) {
@@ -1099,20 +1123,25 @@ class BasesVisualsHost {
   }
 
   triggerCommunityBasesVisualsEnhancer() {
-    try {
-      const bpc = this.module.ctx.app?.plugins?.plugins?.["bases-pill-colors"] || this.module.bpcPlugin;
-      const container = this.controller.viewContainerEl;
-      if (bpc?.enhancer) {
-        if (container) {
-          bpc.enhancer.refreshAround?.(container);
-          bpc.enhancer.processTree?.(container);
+    if (this._bpcEnhancerPending) return;
+    this._bpcEnhancerPending = true;
+    requestAnimationFrame(() => {
+      this._bpcEnhancerPending = false;
+      try {
+        const bpc = this.module.ctx.app?.plugins?.plugins?.["bases-pill-colors"] || this.module.bpcPlugin;
+        const container = this.controller.viewContainerEl;
+        if (bpc?.enhancer) {
+          if (container && container.isConnected) {
+            bpc.enhancer.refreshAround?.(container);
+            bpc.enhancer.processTree?.(container);
+          }
+          const toolbar = this.controller.viewHeaderEl?.querySelector(".bases-toolbar");
+          if (toolbar && toolbar.isConnected) {
+            bpc.enhancer.processToolbar?.(toolbar);
+          }
         }
-        const toolbar = this.controller.viewHeaderEl?.querySelector(".bases-toolbar");
-        if (toolbar) {
-          bpc.enhancer.processToolbar?.(toolbar);
-        }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    });
   }
 
   // Get current view's configuration object from query
@@ -1157,13 +1186,11 @@ class BasesVisualsHost {
     if (typeof this.controller.notifyView === "function") {
       this.controller.notifyView();
     }
-    // Perform immediate and scheduled updates so pagination row is never lost
-    this.updatePaginationBar();
-    setTimeout(() => this.updatePaginationBar(), 40);
-    setTimeout(() => this.updatePaginationBar(), 120);
-    setTimeout(() => this.updatePaginationBar(), 300);
-    setTimeout(() => this.updatePaginationBar(), 600);
-    this.processPillsAndListCells();
+    // Perform debounced updates so pagination row is cleanly updated
+    this.requestUpdatePaginationBar();
+    setTimeout(() => this.requestUpdatePaginationBar(), 60);
+    setTimeout(() => this.requestUpdatePaginationBar(), 200);
+    this.setupInteractivity();
   }
 
   // -----------------------------------------------------------------------
@@ -1872,10 +1899,8 @@ class BasesVisualsHost {
       const origOnDataUpdated = view.onDataUpdated.bind(view);
       view.onDataUpdated = () => {
         origOnDataUpdated();
-        setTimeout(() => {
-          this.updatePaginationBar();
-          this.triggerCommunityBasesVisualsEnhancer();
-        }, 15);
+        this.requestUpdatePaginationBar();
+        this.triggerCommunityBasesVisualsEnhancer();
       };
       this.cleanups.push(() => {
         if (view.__basesVisualsViewHooked) {
@@ -1896,10 +1921,8 @@ class BasesVisualsHost {
         this.ensureDataClassHooked(this.controller.view.data.constructor);
       }
       this.hookView();
-      setTimeout(() => {
-        this.updatePaginationBar();
-        this.triggerCommunityBasesVisualsEnhancer();
-      }, 15);
+      this.requestUpdatePaginationBar();
+      this.triggerCommunityBasesVisualsEnhancer();
     };
 
     if (typeof this.controller.requestNotifyView === "function" && !this.controller.__basesVisualsReqHooked) {
@@ -1907,10 +1930,8 @@ class BasesVisualsHost {
       const origReq = this.controller.requestNotifyView.bind(this.controller);
       this.controller.requestNotifyView = () => {
         origReq();
-        setTimeout(() => {
-          this.updatePaginationBar();
-          this.triggerCommunityBasesVisualsEnhancer();
-        }, 65);
+        this.requestUpdatePaginationBar();
+        this.triggerCommunityBasesVisualsEnhancer();
       };
       this.cleanups.push(() => {
         this.controller.requestNotifyView = origReq;
@@ -1923,6 +1944,15 @@ class BasesVisualsHost {
         this.controller.notifyView = origNotifyView;
         delete this.controller.__basesVisualsNotifyHooked;
       }
+    });
+  }
+
+  requestUpdatePaginationBar() {
+    if (this._paginationPending) return;
+    this._paginationPending = true;
+    requestAnimationFrame(() => {
+      this._paginationPending = false;
+      this.updatePaginationBar();
     });
   }
 
@@ -2065,7 +2095,7 @@ class BasesVisualsHost {
       }
     });
 
-    this.processPillsAndListCells();
+    this.setupInteractivity();
   }
 
   goToPage(pageNumber) {
@@ -2119,11 +2149,13 @@ class BasesViewConfigObserver {
     this.module = moduleInstance;
     this.observer = new MutationObserver((mutations) => {
       let shouldScan = false;
-      for (const m of mutations) {
-        for (const n of m.addedNodes) {
+      for (let i = 0; i < mutations.length; i++) {
+        const m = mutations[i];
+        for (let j = 0; j < m.addedNodes.length; j++) {
+          const n = m.addedNodes[j];
           if (n.nodeType === 1) {
             if (
-              n.matches?.(".view-config-menu, .bases-toolbar-menu-form") ||
+              n.matches?.(".view-config-menu, .bases-toolbar-menu-form, .menu, .popover") ||
               n.querySelector?.(".view-config-menu, .bases-toolbar-menu-form")
             ) {
               shouldScan = true;
@@ -2142,7 +2174,8 @@ class BasesViewConfigObserver {
         }
       }
     });
-    this.observer.observe(document.body, { childList: true, subtree: true });
+    // Menus and popovers are direct children of document.body: subtree:false eliminates deep tree traversals
+    this.observer.observe(document.body, { childList: true, subtree: false });
     this.scanForMenus();
   }
 
@@ -2667,40 +2700,22 @@ class BasesVisualsModule {
     this.cleanups.push(() => document.removeEventListener("click", handleTabPanelInteraction, true));
 
     const tabMutationObserver = new MutationObserver((mutations) => {
-      // Never disturb toolbar tabs while a menu or Configure view popover is open, but preserve pagination bar
-      if (document.body.querySelector(".menu, .bases-toolbar-menu-form.view-config-menu")) {
-        for (const host of this.hosts.values()) {
-          if (host.getSettings().paginationEnabled && !host.paginationBarEl?.isConnected) {
-            host.updatePaginationBar();
-          }
-        }
-        return;
-      }
-
       let needsRefresh = false;
-      for (const m of mutations) {
-        if (m.type === "attributes" && m.attributeName === "class") {
-          const t = m.target;
-          if (t?.closest?.(".menu, .bases-toolbar-menu, .modal, .bases-toolbar, .bases-visuals-config-container")) {
-            continue;
-          }
-          if (t?.classList?.contains?.("selected") || t?.closest?.(".tab-panel-container")) {
-            needsRefresh = true;
-            break;
-          }
-        } else if (m.type === "childList") {
-          for (const node of Array.from(m.addedNodes)) {
-            if (node.nodeType === 1) {
-              if (node.closest?.(".menu, .bases-toolbar-menu, .bases-visuals-config-container")) {
-                continue;
-              }
-              if (node.matches?.(".bases-embed, .bases-view, .tab-panel-container") || node.querySelector?.(".bases-embed, .bases-view, .tab-panel-container")) {
-                needsRefresh = true;
-                break;
-              }
+      for (let i = 0; i < mutations.length; i++) {
+        const m = mutations[i];
+        for (let j = 0; j < m.addedNodes.length; j++) {
+          const node = m.addedNodes[j];
+          if (node.nodeType === 1) {
+            if (
+              node.matches?.(".bases-embed, .bases-view, .tab-panel-container") ||
+              node.querySelector?.(".bases-embed, .bases-view, .tab-panel-container")
+            ) {
+              needsRefresh = true;
+              break;
             }
           }
         }
+        if (needsRefresh) break;
       }
       if (needsRefresh) {
         if (this._tabRefreshTimer) clearTimeout(this._tabRefreshTimer);
@@ -2715,16 +2730,15 @@ class BasesVisualsModule {
     });
 
     try {
-      tabMutationObserver.observe(document.body, {
+      const targetEl = this.ctx.app?.workspace?.containerEl || document.body;
+      tabMutationObserver.observe(targetEl, {
         childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["class"]
+        subtree: true
       });
       this.cleanups.push(() => tabMutationObserver.disconnect());
     } catch (_) {}
 
-    console.log(`[BasesVisuals] Module v1.2.1 started successfully.`);
+    console.log(`[BasesVisuals] Module v1.2.2 started successfully.`);
   };
 
   hookEmbedRegistry() {
@@ -2795,25 +2809,45 @@ class BasesVisualsModule {
     if (this.moduleSettings.enableOnEmbeds) {
       const mdLeaves = app.workspace.getLeavesOfType?.("markdown") || [];
       for (const leaf of mdLeaves) {
+        // Fast-path: skip leaf if no bases embed exists in container
+        if (!leaf.view?.containerEl?.querySelector?.(".bases-embed, .block-language-base, [data-type='base']")) {
+          continue;
+        }
         this.findControllersInComponentTree(leaf.view, (ctrl) => {
           if (this.isValidController(ctrl)) {
             activeControllers.add(ctrl);
             this.attachHost(ctrl);
           }
-        });
+        }, 0);
       }
 
-      // 3. Scan Plugin Component Trees (only when tab panels or embeds are present in the DOM)
-      const hasEmbedOrPanel = !!document.body.querySelector(".tab-panel-container, .bases-embed");
-      if (hasEmbedOrPanel && app.plugins?.plugins) {
+      // 3. Scan Plugin Component Trees ONLY if there are unattached embeds in the DOM
+      const embedsInDom = document.querySelectorAll(".bases-embed, [data-type='base']");
+      let hasUnattachedEmbed = false;
+      for (let i = 0; i < embedsInDom.length; i++) {
+        const el = embedsInDom[i];
+        let claimed = false;
+        for (const host of this.hosts.values()) {
+          if (host.controller?.viewContainerEl && (host.controller.viewContainerEl === el || host.controller.viewContainerEl.contains(el) || el.contains(host.controller.viewContainerEl))) {
+            claimed = true;
+            break;
+          }
+        }
+        if (!claimed) {
+          hasUnattachedEmbed = true;
+          break;
+        }
+      }
+
+      if (hasUnattachedEmbed && app.plugins?.plugins) {
         for (const plugin of Object.values(app.plugins.plugins)) {
-          if (plugin && Array.isArray(plugin._children)) {
+          if (plugin && Array.isArray(plugin._children) && plugin._children.length > 0) {
             this.findControllersInComponentTree(plugin, (ctrl) => {
               if (this.isValidController(ctrl)) {
                 activeControllers.add(ctrl);
                 this.attachHost(ctrl);
               }
-            });
+            }, 0);
           }
         }
       }
@@ -2828,14 +2862,14 @@ class BasesVisualsModule {
   }
 
   findControllersInComponentTree(component, callback, depth = 0, visited = new Set()) {
-    if (!component || depth > 25 || visited.has(component)) return;
+    if (!component || depth > 8 || visited.has(component)) return;
     visited.add(component);
     if (component.controller && this.isValidController(component.controller)) {
       callback(component.controller);
     }
     if (Array.isArray(component._children)) {
-      for (const child of component._children) {
-        this.findControllersInComponentTree(child, callback, depth + 1, visited);
+      for (let i = 0; i < component._children.length; i++) {
+        this.findControllersInComponentTree(component._children[i], callback, depth + 1, visited);
       }
     }
   }
@@ -2859,8 +2893,8 @@ class BasesVisualsModule {
         if (!host.tabStripEl?.isConnected || !host.paginationBarEl?.isConnected || host.needsRender) {
           host.renderTabs();
           host.syncToolbarTools();
-          host.updatePaginationBar();
-          host.processPillsAndListCells();
+          host.requestUpdatePaginationBar();
+          host.setupInteractivity();
           host.needsRender = false;
         }
       }

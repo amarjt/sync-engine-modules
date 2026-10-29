@@ -2,7 +2,7 @@
 name: Workflow & Plugin Manager
 icon: layout-grid
 description: Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.
-version: 1.1.0
+version: 1.1.1
 readme: https://github.com/amarjt/sync-engine-modules
 */
 
@@ -643,23 +643,42 @@ class WorkflowManagerDashboardRenderer {
     const refreshBtn = tools.createEl("button", {
       cls: "manager-action-btn",
       attr: {
-        "aria-label": "Reload Plugins & Modules"
+        "aria-label": "Rescan Plugins & Modules"
       }
     });
     if (typeof setIcon === "function") setIcon(refreshBtn, "refresh-ccw");
     else refreshBtn.setText("↻");
-    refreshBtn.createSpan({ text: "Reload" });
+    refreshBtn.createSpan({ text: "Rescan" });
     refreshBtn.addEventListener("click", async () => {
       try {
         if (this.app.plugins?.loadManifests) await this.app.plugins.loadManifests();
-        if (this.module.ctx?.loadDiscoveredModules) await this.module.ctx.loadDiscoveredModules();
-        new Notice("✓ Reloaded plugins and modules catalog.");
+        if (typeof this.module.ctx?.fetchSources === "function") {
+          await this.module.ctx.fetchSources(true);
+        }
+        if (typeof this.module.ctx?.loadAllModules === "function") {
+          await this.module.ctx.loadAllModules();
+        }
+        new Notice("✓ Rescanned plugins and modules catalog.");
         this.renderHeader();
         this.renderFilterSection();
         this.renderActiveTab();
       } catch (e) {
-        new Notice("Reload failed: " + e.message);
+        new Notice("Rescan failed: " + e.message);
       }
+    });
+
+    // Reload Sync Engine auto-cycle tool
+    const reloadEngineBtn = tools.createEl("button", {
+      cls: "manager-action-btn is-cta",
+      attr: {
+        "aria-label": "Quick Reload Sync Engine & All Modules (Auto-Cycle)"
+      }
+    });
+    if (typeof setIcon === "function") setIcon(reloadEngineBtn, "refresh-cw");
+    else reloadEngineBtn.setText("⚡");
+    reloadEngineBtn.createSpan({ text: "Reload Engine" });
+    reloadEngineBtn.addEventListener("click", async () => {
+      await this.module.reloadSyncEngine();
     });
 
     // Save tool: Save Current Setup (Obsidian native aria-label ONLY)
@@ -1055,6 +1074,19 @@ class WorkflowManagerDashboardRenderer {
                 .setIcon("settings")
                 .onClick(() => {
                   this.openPluginOrModuleSettings(item.id);
+                });
+            });
+          }
+
+          // Hot-Reload Module
+          if (item.type === "module") {
+            menu.addItem((menuItem) => {
+              menuItem
+                .setTitle("Hot-Reload Module")
+                .setIcon("refresh-cw")
+                .onClick(async () => {
+                  await this.module.hotReloadModule(item.id);
+                  this.renderActiveTab();
                 });
             });
           }
@@ -3366,6 +3398,14 @@ class WorkflowManagerModule {
           await this.openDashboardInOwnWindow();
         }
       });
+
+      this.ctx.addCommand({
+        id: "workflow-manager-reload-sync-engine",
+        name: "Workflow Manager: Quick Reload Sync Engine & All Modules",
+        callback: async () => {
+          await this.reloadSyncEngine();
+        }
+      });
     }
 
     // Register setting tab in Obsidian
@@ -3448,6 +3488,71 @@ class WorkflowManagerModule {
       }
     } catch (e) {
       console.warn(`[WorkflowManager] Could not dynamically toggle module ${moduleId}:`, e);
+    }
+  }
+
+  // Hot-reload a single module without restarting Sync Engine
+  async hotReloadModule(moduleId) {
+    const app = this.ctx?.app || this.app || window.app;
+    try {
+      new Notice(`Hot-reloading module '${moduleId}'...`, 2000);
+      if (typeof this.ctx.unloadModule === "function") {
+        this.ctx.unloadModule(moduleId);
+      }
+
+      const meta = this.ctx.discoveredModules?.get(moduleId);
+      if (meta && typeof this.ctx.loadModule === "function") {
+        await this.ctx.loadModule(meta, true);
+        new Notice(`✓ Module '${moduleId}' hot-reloaded successfully.`);
+        return true;
+      } else {
+        if (typeof this.ctx.loadAllModules === "function") {
+          await this.ctx.loadAllModules();
+        }
+        new Notice(`✓ Rescanned modules from disk.`);
+        return true;
+      }
+    } catch (err) {
+      console.error(`Failed to hot-reload module ${moduleId}:`, err);
+      new Notice(`Hot-reload failed: ${err.message}`);
+      return false;
+    }
+  }
+
+  // Quick reload Sync Engine and all modules via 150ms auto-cycle
+  async reloadSyncEngine() {
+    const app = this.ctx?.app || this.app || window.app;
+    if (!app?.plugins) {
+      new Notice("Obsidian plugins system not accessible.");
+      return;
+    }
+
+    const pluginId = "sync-engine";
+    if (!app.plugins.plugins?.[pluginId]) {
+      new Notice("Sync Engine plugin is not loaded.");
+      return;
+    }
+
+    try {
+      new Notice("🔄 Reloading Sync Engine & modules...", 2000);
+      await app.plugins.disablePlugin(pluginId);
+      window.setTimeout(async () => {
+        try {
+          await app.plugins.enablePlugin(pluginId);
+          new Notice("✓ Sync Engine & all modules reloaded successfully!", 3000);
+          if (this.renderer && typeof this.renderer.renderActiveTab === "function") {
+            this.renderer.renderHeader();
+            this.renderer.renderFilterSection();
+            this.renderer.renderActiveTab();
+          }
+        } catch (enableErr) {
+          console.error("Failed to re-enable Sync Engine:", enableErr);
+          new Notice(`Failed to re-enable Sync Engine: ${enableErr.message}`);
+        }
+      }, 150);
+    } catch (err) {
+      console.error("Failed to disable Sync Engine:", err);
+      new Notice(`Reload failed: ${err.message}`);
     }
   }
 
