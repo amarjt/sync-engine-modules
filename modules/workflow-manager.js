@@ -2,7 +2,7 @@
 name: Workflow & Plugin Manager
 icon: layout-grid
 description: Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.
-version: 1.1.1
+version: 1.2.0
 readme: https://github.com/amarjt/sync-engine-modules
 */
 
@@ -158,7 +158,7 @@ function createContextMenu() {
   };
 }
 
-class EditModuleModal extends Modal {
+class EditModuleModal extends (Modal || class {}) {
   constructor(app, moduleMeta, onSave) {
     super(app);
     this.moduleMeta = { ...moduleMeta };
@@ -386,6 +386,320 @@ class StandaloneModuleSettingModal extends (Modal || class {}) {
 }
 
 // -------------------------------------------------------------
+// UI Modal: Configure Workflow Profile
+// -------------------------------------------------------------
+class WorkflowProfileEditModal extends (Modal || class {}) {
+  constructor(app, moduleInstance, profileName, onSave) {
+    super(app);
+    this.module = moduleInstance;
+    this.profileName = profileName;
+    this.onSave = onSave;
+
+    const existing = this.module.moduleSettings?.profiles?.[profileName] || {
+      workspace: "",
+      plugins: {},
+      modules: {}
+    };
+
+    this.workspace = existing.workspace || "";
+    this.plugins = Object.assign({}, existing.plugins || {});
+    this.modules = Object.assign({}, existing.modules || {});
+    this.searchQuery = "";
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("profile-edit-modal");
+
+    const header = contentEl.createDiv("profile-edit-header");
+    header.createEl("h2", { text: `Edit Profile: ${this.profileName}` });
+
+    const wsRow = contentEl.createDiv("profile-edit-row");
+    wsRow.createEl("label", { text: "Bound Obsidian Workspace:" });
+
+    const wsPlugin = this.app?.internalPlugins?.getPluginById("workspaces");
+    const availableWs = wsPlugin?.instance?.workspaces ? Object.keys(wsPlugin.instance.workspaces) : [];
+
+    const wsSelect = wsRow.createEl("select", { cls: "dropdown" });
+    const noneOpt = wsSelect.createEl("option", { text: "(None - Do not switch workspace)", value: "" });
+    if (!this.workspace) noneOpt.selected = true;
+
+    availableWs.forEach((ws) => {
+      const opt = wsSelect.createEl("option", { text: ws, value: ws });
+      if (this.workspace === ws) opt.selected = true;
+    });
+
+    wsSelect.addEventListener("change", (e) => {
+      this.workspace = e.target.value;
+    });
+
+    const toolsRow = contentEl.createDiv("profile-edit-tools");
+    const searchInput = toolsRow.createEl("input", {
+      type: "search",
+      cls: "manager-search-input",
+      placeholder: "Filter plugins and modules..."
+    });
+    searchInput.addEventListener("input", (e) => {
+      this.searchQuery = e.target.value.toLowerCase().trim();
+      this.renderLists(listContainer);
+    });
+
+    const snapBtn = toolsRow.createEl("button", {
+      cls: "manager-action-btn",
+      text: "Snapshot Active Vault"
+    });
+    snapBtn.addEventListener("click", () => {
+      if (this.app?.plugins?.manifests) {
+        for (const id of Object.keys(this.app.plugins.manifests)) {
+          this.plugins[id] = this.app.plugins.enabledPlugins?.has(id) || false;
+        }
+      }
+      if (this.module.ctx?.discoveredModules) {
+        for (const id of this.module.ctx.discoveredModules.keys()) {
+          this.modules[id] = this.module.ctx.settings?.modules?.[id]?.enabled ?? true;
+        }
+      }
+      new Notice("✓ Captured live vault setup into editor.");
+      this.renderLists(listContainer);
+    });
+
+    const listContainer = contentEl.createDiv("profile-edit-lists");
+    this.renderLists(listContainer);
+
+    const footer = contentEl.createDiv("profile-edit-footer");
+    const cancelBtn = footer.createEl("button", { cls: "manager-action-btn", text: "Cancel" });
+    cancelBtn.addEventListener("click", () => this.close());
+
+    const saveBtn = footer.createEl("button", { cls: "manager-action-btn is-cta", text: "Save Profile" });
+    saveBtn.addEventListener("click", async () => {
+      if (!this.module.moduleSettings.profiles) this.module.moduleSettings.profiles = {};
+      this.module.moduleSettings.profiles[this.profileName] = {
+        workspace: this.workspace,
+        plugins: this.plugins,
+        modules: this.modules
+      };
+      await this.module.saveSettings();
+      new Notice(`✓ Saved profile '${this.profileName}'.`);
+      if (typeof this.onSave === "function") this.onSave();
+      this.close();
+    });
+  }
+
+  renderLists(container) {
+    container.empty();
+
+    const plugSection = container.createDiv("profile-section");
+    const plugHeader = plugSection.createDiv("profile-section__header");
+    plugHeader.createEl("h4", { text: "Community Plugins" });
+
+    const plugTools = plugHeader.createDiv("profile-section__tools");
+    const allOnBtn = plugTools.createEl("button", { cls: "manager-action-btn", text: "Enable All" });
+    allOnBtn.addEventListener("click", () => {
+      Object.keys(this.app?.plugins?.manifests || {}).forEach((id) => { this.plugins[id] = true; });
+      this.renderLists(container);
+    });
+    const allOffBtn = plugTools.createEl("button", { cls: "manager-action-btn", text: "Disable All" });
+    allOffBtn.addEventListener("click", () => {
+      Object.keys(this.app?.plugins?.manifests || {}).forEach((id) => {
+        if (id !== "sync-engine" && id !== this.module.getModuleId()) this.plugins[id] = false;
+      });
+      this.renderLists(container);
+    });
+
+    const manifests = this.app?.plugins?.manifests || {};
+    const filteredPlugins = Object.entries(manifests).filter(([id, m]) => {
+      if (!this.searchQuery) return true;
+      return id.toLowerCase().includes(this.searchQuery) || (m.name || "").toLowerCase().includes(this.searchQuery);
+    });
+
+    const plugGrid = plugSection.createDiv("profile-items-grid");
+    filteredPlugins.forEach(([id, m]) => {
+      const isEnabled = this.plugins[id] !== false;
+      const row = plugGrid.createDiv(`profile-item-row ${isEnabled ? "is-enabled" : ""}`);
+      row.createSpan({ text: m.name || id, cls: "profile-item-name" });
+      if (id === "sync-engine") {
+        row.createSpan({ text: "(Core Host - Locked)", cls: "manager-tag" });
+      } else {
+        const toggle = row.createEl("input", { type: "checkbox" });
+        toggle.checked = isEnabled;
+        toggle.addEventListener("change", (e) => {
+          this.plugins[id] = e.target.checked;
+          row.toggleClass("is-enabled", e.target.checked);
+        });
+      }
+    });
+
+    const modSection = container.createDiv("profile-section");
+    const modHeader = modSection.createDiv("profile-section__header");
+    modHeader.createEl("h4", { text: "Sync Engine Modules" });
+
+    const discovered = this.module.ctx?.discoveredModules || new Map();
+    const filteredMods = Array.from(discovered.entries()).filter(([id, m]) => {
+      if (!this.searchQuery) return true;
+      return id.toLowerCase().includes(this.searchQuery) || (m.name || "").toLowerCase().includes(this.searchQuery);
+    });
+
+    const modGrid = modSection.createDiv("profile-items-grid");
+    filteredMods.forEach(([id, m]) => {
+      const isEnabled = this.modules[id] !== false;
+      const row = modGrid.createDiv(`profile-item-row ${isEnabled ? "is-enabled" : ""}`);
+      row.createSpan({ text: m.name || id, cls: "profile-item-name" });
+      if (id === this.module.getModuleId()) {
+        row.createSpan({ text: "(Workflow Manager - Locked)", cls: "manager-tag" });
+      } else {
+        const toggle = row.createEl("input", { type: "checkbox" });
+        toggle.checked = isEnabled;
+        toggle.addEventListener("change", (e) => {
+          this.modules[id] = e.target.checked;
+          row.toggleClass("is-enabled", e.target.checked);
+        });
+      }
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+// -------------------------------------------------------------
+// UI Modal: Create Workflow Profile
+// -------------------------------------------------------------
+class WorkflowProfileCreateModal extends (Modal || class {}) {
+  constructor(app, moduleInstance, onCreated) {
+    super(app);
+    this.module = moduleInstance;
+    this.onCreated = onCreated;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("profile-edit-modal");
+
+    contentEl.createEl("h2", { text: "Create New Workflow Profile" });
+
+    const nameRow = contentEl.createDiv("profile-edit-row");
+    nameRow.createEl("label", { text: "Profile Name:" });
+    const nameInput = nameRow.createEl("input", { type: "text", placeholder: "e.g. Research & Writing" });
+
+    const cloneRow = contentEl.createDiv("profile-edit-row");
+    const cloneCheck = cloneRow.createEl("input", { type: "checkbox" });
+    cloneCheck.checked = true;
+    cloneRow.createEl("label", { text: " Clone current active plugins & modules setup into new profile" });
+
+    const btnRow = contentEl.createDiv("profile-edit-footer");
+    const cancelBtn = btnRow.createEl("button", { cls: "manager-action-btn", text: "Cancel" });
+    cancelBtn.addEventListener("click", () => this.close());
+
+    const createBtn = btnRow.createEl("button", { cls: "manager-action-btn is-cta", text: "Create Profile" });
+    createBtn.addEventListener("click", async () => {
+      const name = nameInput.value.trim();
+      if (!name) {
+        new Notice("Please enter a profile name.");
+        return;
+      }
+      if (cloneCheck.checked) {
+        await this.module.snapshotProfile(name);
+      } else {
+        if (!this.module.moduleSettings.profiles) this.module.moduleSettings.profiles = {};
+        this.module.moduleSettings.profiles[name] = {
+          workspace: "",
+          plugins: {},
+          modules: {}
+        };
+        await this.module.saveSettings();
+      }
+      new Notice(`✓ Created workflow profile '${name}'.`);
+      if (typeof this.onCreated === "function") this.onCreated(name);
+      this.close();
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+// -------------------------------------------------------------
+// UI Modal: Publish Converted Module to Git Catalog
+// -------------------------------------------------------------
+class PublishModuleToGitModal extends (Modal || class {}) {
+  constructor(app, moduleInstance, moduleInfo = {}) {
+    super(app);
+    this.module = moduleInstance;
+    this.info = Object.assign({
+      id: "",
+      name: "",
+      version: "1.0.0",
+      description: "",
+      author: "",
+      icon: "puzzle",
+      repoPath: "D:/All Obsidian Vaults/sync-engine-modules"
+    }, moduleInfo);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("publish-git-modal");
+
+    contentEl.createEl("h2", { text: "Publish Converted Module to Git Catalog" });
+    const desc = contentEl.createEl("p", { cls: "text-muted" });
+    desc.setText("Export this converted module directly into the Git repository, recompute its SHA-256 integrity hash, synchronize modules.json with live raw GitHub URL, and sync your vault.");
+
+    const form = contentEl.createDiv("publish-git-form");
+
+    const addField = (label, value, onChange, placeholder = "") => {
+      const row = form.createDiv("publish-form-row");
+      row.createEl("label", { text: label });
+      const input = row.createEl("input", {
+        type: "text",
+        value: value || "",
+        placeholder: placeholder
+      });
+      input.addEventListener("input", (e) => onChange(e.target.value));
+      return input;
+    };
+
+    addField("Module ID (Slug)", this.info.id, (v) => { this.info.id = v.trim(); });
+    addField("Module Name", this.info.name || this.info.id, (v) => { this.info.name = v.trim(); });
+    addField("Version", this.info.version || "1.0.0", (v) => { this.info.version = v.trim(); });
+    addField("Description", this.info.description || "", (v) => { this.info.description = v.trim(); });
+    addField("Icon (Lucide name)", this.info.icon || "puzzle", (v) => { this.info.icon = v.trim(); });
+    addField("Git Repository Path", this.info.repoPath, (v) => { this.info.repoPath = v.trim(); });
+
+    const btnRow = contentEl.createDiv("publish-btn-row");
+    const cancelBtn = btnRow.createEl("button", { cls: "manager-action-btn", text: "Cancel" });
+    cancelBtn.addEventListener("click", () => this.close());
+
+    const submitBtn = btnRow.createEl("button", {
+      cls: "manager-action-btn is-cta",
+      text: "Package & Sync to Catalog"
+    });
+
+    submitBtn.addEventListener("click", async () => {
+      submitBtn.disabled = true;
+      submitBtn.setText("Packaging & Syncing...");
+      try {
+        const result = await this.module.publishModuleToGit(this.info);
+        new Notice(`✓ Successfully packaged '${result.name}' to Git catalog!`, 5000);
+        this.close();
+      } catch (err) {
+        new Notice(`Failed to publish module: ${err.message}`, 7000);
+        submitBtn.disabled = false;
+        submitBtn.setText("Package & Sync to Catalog");
+      }
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+// -------------------------------------------------------------
 // Reusable Better Manager Dashboard Component
 // Mounts into either a Standalone Popout Window (ItemView) or Modal
 // -------------------------------------------------------------
@@ -467,6 +781,55 @@ class WorkflowManagerDashboardRenderer {
         }
       } catch (err) {
         console.error("[WorkflowManager] Failed to open Obsidian setting tab:", err);
+      }
+    }
+
+    if (mainWindow && typeof mainWindow.focus === "function") {
+      try {
+        mainWindow.focus();
+      } catch (_) {}
+    }
+  }
+
+  openSyncEngineModuleManagement() {
+    if (this.isModalHost && typeof this.onCloseCallback === "function") {
+      try {
+        this.onCloseCallback();
+      } catch (_) {}
+    }
+
+    const mainWindow = (typeof window !== "undefined" && window.electron?.remote?.BrowserWindow)
+      ? window
+      : (this.app?.workspace?.containerEl?.ownerDocument?.defaultView || (typeof window !== "undefined" ? window : null));
+
+    if (this.app?.setting) {
+      try {
+        if (typeof this.app.setting.open === "function") {
+          this.app.setting.open();
+        }
+        if (typeof this.app.setting.openTabById === "function") {
+          const tab = this.app.setting.openTabById("sync-engine");
+          setTimeout(() => {
+            try {
+              const container = tab?.containerEl || this.app?.setting?.containerEl;
+              if (container) {
+                const items = container.querySelectorAll(".setting-item");
+                for (const item of items) {
+                  const nameEl = item.querySelector(".setting-item-name");
+                  if (nameEl && /module\s*management/i.test(nameEl.textContent)) {
+                    const btn = item.querySelector("button, .setting-item-control, .clickable-icon") || item;
+                    btn.click();
+                    break;
+                  }
+                }
+              }
+            } catch (e) {
+              console.error("[WorkflowManager] Failed to navigate to module management subpage:", e);
+            }
+          }, 120);
+        }
+      } catch (err) {
+        console.error("[WorkflowManager] Failed to open Sync Engine module management:", err);
       }
     }
 
@@ -667,20 +1030,6 @@ class WorkflowManagerDashboardRenderer {
       }
     });
 
-    // Reload Sync Engine auto-cycle tool
-    const reloadEngineBtn = tools.createEl("button", {
-      cls: "manager-action-btn is-cta",
-      attr: {
-        "aria-label": "Quick Reload Sync Engine & All Modules (Auto-Cycle)"
-      }
-    });
-    if (typeof setIcon === "function") setIcon(reloadEngineBtn, "refresh-cw");
-    else reloadEngineBtn.setText("⚡");
-    reloadEngineBtn.createSpan({ text: "Reload Engine" });
-    reloadEngineBtn.addEventListener("click", async () => {
-      await this.module.reloadSyncEngine();
-    });
-
     // Save tool: Save Current Setup (Obsidian native aria-label ONLY)
     const snapBtn = tools.createEl("button", {
       cls: "manager-action-btn",
@@ -700,6 +1049,42 @@ class WorkflowManagerDashboardRenderer {
         this.renderFilterSection();
         this.renderActiveTab();
       }
+    });
+
+    // Dedicated Quick-Access Navigation Group
+    const quickLinks = tools.createDiv("manager-toolbar__quicklinks");
+
+    const modMgmtBtn = quickLinks.createEl("button", {
+      cls: "manager-quicklink-btn manager-quicklink-btn--accent",
+      attr: { "aria-label": "Open Sync Engine Module Management" }
+    });
+    if (typeof setIcon === "function") setIcon(modMgmtBtn, "package");
+    else modMgmtBtn.setText("📦");
+    modMgmtBtn.createSpan({ text: "Module Management" });
+    modMgmtBtn.addEventListener("click", () => {
+      this.openSyncEngineModuleManagement();
+    });
+
+    const obsPluginsBtn = quickLinks.createEl("button", {
+      cls: "manager-quicklink-btn",
+      attr: { "aria-label": "Open Obsidian Community Plugins Settings" }
+    });
+    if (typeof setIcon === "function") setIcon(obsPluginsBtn, "puzzle");
+    else obsPluginsBtn.setText("🧩");
+    obsPluginsBtn.createSpan({ text: "Community Plugins" });
+    obsPluginsBtn.addEventListener("click", () => {
+      this.openObsidianSetting("community-plugins");
+    });
+
+    const syncEngineBtn = quickLinks.createEl("button", {
+      cls: "manager-quicklink-btn",
+      attr: { "aria-label": "Open Sync Engine Settings" }
+    });
+    if (typeof setIcon === "function") setIcon(syncEngineBtn, "settings");
+    else syncEngineBtn.setText("⚙️");
+    syncEngineBtn.createSpan({ text: "Sync Engine" });
+    syncEngineBtn.addEventListener("click", () => {
+      this.openObsidianSetting("sync-engine");
     });
   }
 
@@ -775,29 +1160,6 @@ class WorkflowManagerDashboardRenderer {
           this.renderActiveTab();
         });
       });
-
-      // Direct shortcuts to Obsidian Community Plugins & Sync Engine Settings
-      const navGroup = chipsEl.createDiv("manager-filter-chips__nav");
-
-      const obsPluginsBtn = navGroup.createEl("button", {
-        cls: "manager-action-btn manager-action-btn--nav",
-        attr: { "aria-label": "Open Obsidian Community Plugins Manager" }
-      });
-      if (typeof setIcon === "function") setIcon(obsPluginsBtn, "puzzle");
-      obsPluginsBtn.createSpan({ text: "Community Plugins" });
-      obsPluginsBtn.addEventListener("click", () => {
-        this.openObsidianSetting("community-plugins");
-      });
-
-      const syncEngineBtn = navGroup.createEl("button", {
-        cls: "manager-action-btn manager-action-btn--nav",
-        attr: { "aria-label": "Open Sync Engine Module Management" }
-      });
-      if (typeof setIcon === "function") setIcon(syncEngineBtn, "layers");
-      syncEngineBtn.createSpan({ text: "Sync Engine" });
-      syncEngineBtn.addEventListener("click", () => {
-        this.openObsidianSetting("sync-engine");
-      });
     }
   }
 
@@ -806,6 +1168,8 @@ class WorkflowManagerDashboardRenderer {
 
     if (this.activeTab === "items") {
       this.renderItemsTab();
+    } else if (this.activeTab === "syncmodules") {
+      this.renderSyncModulesTab();
     } else if (this.activeTab === "profiles") {
       this.renderProfilesTab();
     } else if (this.activeTab === "delayed") {
@@ -1401,8 +1765,10 @@ class WorkflowManagerDashboardRenderer {
 
   // Tab 2: Workflow Profiles
   renderProfilesTab() {
-    const profiles = this.module.moduleSettings.profiles || {};
-    const activeProf = this.module.moduleSettings.activeProfile || "Default";
+    this.pageEl.empty();
+
+    const profiles = this.module.moduleSettings?.profiles || {};
+    const activeProf = this.module.moduleSettings?.activeProfile || "Default";
 
     const topSection = this.pageEl.createDiv();
     topSection.style.display = "flex";
@@ -1410,23 +1776,52 @@ class WorkflowManagerDashboardRenderer {
     topSection.style.justifyContent = "space-between";
     topSection.style.marginBottom = "14px";
 
-    topSection.createEl("h3", { text: "Configured Workflow Profiles", cls: "m-0" });
+    const titleGroup = topSection.createDiv();
+    titleGroup.createEl("h3", { text: "Workflow Profiles", cls: "m-0" });
+    const sub = titleGroup.createEl("p", { cls: "text-muted m-0" });
+    sub.setText("Create specialized environments by switching active plugins, modules, and workspace layouts in one click.");
 
-    const newBtn = topSection.createEl("button", { cls: "manager-action-btn is-cta" });
+    const btnGroup = topSection.createDiv();
+    btnGroup.style.display = "flex";
+    btnGroup.style.gap = "8px";
+
+    const newBtn = btnGroup.createEl("button", { cls: "manager-action-btn is-cta" });
     if (typeof setIcon === "function") setIcon(newBtn, "plus");
     newBtn.createSpan({ text: "Create Profile" });
-    newBtn.addEventListener("click", async () => {
-      const name = prompt("Enter a name for the new workflow profile:", "Coding Workflow");
+    newBtn.addEventListener("click", () => {
+      new WorkflowProfileCreateModal(this.app, this.module, (createdName) => {
+        this.renderProfilesTab();
+        new WorkflowProfileEditModal(this.app, this.module, createdName, () => {
+          this.renderProfilesTab();
+        }).open();
+      }).open();
+    });
+
+    const snapCurrentBtn = btnGroup.createEl("button", { cls: "manager-action-btn" });
+    if (typeof setIcon === "function") setIcon(snapCurrentBtn, "camera");
+    snapCurrentBtn.createSpan({ text: "Snapshot Active Vault" });
+    snapCurrentBtn.addEventListener("click", async () => {
+      const name = prompt("Save current active vault setup as profile name:", activeProf);
       if (name && name.trim()) {
         await this.module.snapshotProfile(name.trim());
-        new Notice(`✓ Created workflow profile '${name.trim()}'`);
+        new Notice(`✓ Saved current setup as profile '${name.trim()}'.`);
+        this.renderHeader();
         this.renderProfilesTab();
       }
     });
 
+    if (Object.keys(profiles).length === 0) {
+      const emptyBox = this.pageEl.createDiv();
+      emptyBox.style.padding = "40px";
+      emptyBox.style.textAlign = "center";
+      emptyBox.style.color = "var(--text-muted)";
+      emptyBox.setText("No workflow profiles found. Click 'Create Profile' to add your first profile.");
+      return;
+    }
+
     for (const [profName, prof] of Object.entries(profiles)) {
       const isActive = profName === activeProf;
-      const card = this.pageEl.createDiv("manager-card");
+      const card = this.pageEl.createDiv(`manager-card ${isActive ? "is-active-card" : ""}`);
 
       const left = card.createDiv("manager-card__left");
       const iconBox = left.createDiv("manager-card__icon");
@@ -1438,34 +1833,31 @@ class WorkflowManagerDashboardRenderer {
       titleRow.createSpan({ cls: "manager-card__title", text: profName });
 
       if (isActive) {
-        titleRow.createSpan({ cls: "manager-tag manager-tag--module", text: "ACTIVE" });
+        titleRow.createSpan({ cls: "manager-tag manager-tag--module", text: "ACTIVE PROFILE" });
       }
 
       const plugCount = prof.plugins ? Object.keys(prof.plugins).filter((k) => prof.plugins[k]).length : 0;
       const modCount = prof.modules ? Object.keys(prof.modules).filter((k) => prof.modules[k]).length : 0;
-      const wsText = prof.workspace ? `Workspace: "${prof.workspace}"` : "No workspace linked";
+      const wsText = prof.workspace ? `Workspace: "${prof.workspace}"` : "No workspace bound";
 
       info.createDiv({ cls: "manager-card__desc", text: `${wsText} · ${plugCount} active plugins · ${modCount} active modules` });
 
       const right = card.createDiv("manager-card__right");
 
-      // Link workspace button
-      const linkWsBtn = right.createEl("button", { cls: "manager-action-btn", attr: { "aria-label": "Bind to Obsidian Workspace" } });
-      if (typeof setIcon === "function") setIcon(linkWsBtn, "layout");
-      linkWsBtn.createSpan({ text: "Workspace" });
-      linkWsBtn.addEventListener("click", async () => {
-        const wsName = prompt(`Enter Obsidian workspace name for profile '${profName}' (leave blank to unlink):`, prof.workspace || "");
-        if (wsName !== null) {
-          prof.workspace = wsName.trim();
-          await this.module.saveSettings();
+      // Edit Profile button
+      const editBtn = right.createEl("button", { cls: "manager-action-btn", attr: { "aria-label": "Configure plugins, modules & workspace" } });
+      if (typeof setIcon === "function") setIcon(editBtn, "settings-2");
+      editBtn.createSpan({ text: "Edit Profile" });
+      editBtn.addEventListener("click", () => {
+        new WorkflowProfileEditModal(this.app, this.module, profName, () => {
           this.renderProfilesTab();
-        }
+        }).open();
       });
 
       // Update snapshot button
-      const updateBtn = right.createEl("button", { cls: "manager-action-btn", attr: { "aria-label": "Save current vault setup to this profile" } });
+      const updateBtn = right.createEl("button", { cls: "manager-action-btn", attr: { "aria-label": "Capture current vault state to this profile" } });
       if (typeof setIcon === "function") setIcon(updateBtn, "save");
-      updateBtn.createSpan({ text: "Update" });
+      updateBtn.createSpan({ text: "Snapshot" });
       updateBtn.addEventListener("click", async () => {
         await this.module.snapshotProfile(profName);
         new Notice(`✓ Updated profile '${profName}' snapshot.`);
@@ -1481,26 +1873,257 @@ class WorkflowManagerDashboardRenderer {
       actBtn.createSpan({ text: isActive ? "Active" : "Activate" });
       actBtn.addEventListener("click", async () => {
         if (!isActive) {
-          await this.module.switchProfile(profName);
-          new Notice(`✓ Switched to profile '${profName}'`);
-          this.renderHeader();
-          this.renderProfilesTab();
+          actBtn.disabled = true;
+          try {
+            await this.module.switchProfile(profName);
+            this.renderHeader();
+            this.renderProfilesTab();
+          } finally {
+            actBtn.disabled = false;
+          }
         }
       });
 
       // Delete button (if not Default)
       if (profName !== "Default") {
-        const delBtn = right.createEl("button", { cls: "manager-action-btn", attr: { "aria-label": "Delete profile" } });
+        const delBtn = right.createEl("button", { cls: "manager-action-btn manager-action-btn--icon-only", attr: { "aria-label": "Delete profile" } });
         if (typeof setIcon === "function") setIcon(delBtn, "trash");
         delBtn.addEventListener("click", async () => {
           if (confirm(`Delete workflow profile '${profName}'?`)) {
             delete profiles[profName];
             await this.module.saveSettings();
+            new Notice(`Deleted profile '${profName}'.`);
             this.renderProfilesTab();
           }
         });
       }
     }
+  }
+
+  // Tab 3: Sync Engine Module Management & Catalogs
+  renderSyncModulesTab() {
+    this.pageEl.empty();
+
+    const topSection = this.pageEl.createDiv("sync-modules-header");
+    topSection.createEl("h3", { text: "Sync Engine Module Management", cls: "m-0" });
+    const desc = topSection.createEl("p", { cls: "text-muted" });
+    desc.setText("Manage module sources, discover and install remote community modules, configure auto-updates, and author custom modules without visiting Obsidian settings.");
+
+    // Top action row
+    const actionRow = this.pageEl.createDiv("sync-modules-actions");
+    actionRow.style.display = "flex";
+    actionRow.style.gap = "8px";
+    actionRow.style.marginBottom = "16px";
+
+    const rescanBtn = actionRow.createEl("button", { cls: "manager-action-btn" });
+    if (typeof setIcon === "function") setIcon(rescanBtn, "refresh-ccw");
+    rescanBtn.createSpan({ text: "Rescan & Fetch Sources" });
+    rescanBtn.addEventListener("click", async () => {
+      try {
+        if (typeof this.module.ctx?.fetchSources === "function") await this.module.ctx.fetchSources(true);
+        if (typeof this.module.ctx?.loadAllModules === "function") await this.module.ctx.loadAllModules();
+        new Notice("✓ Rescanned all module sources and disk.");
+        this.renderSyncModulesTab();
+      } catch (e) {
+        new Notice("Rescan failed: " + e.message);
+      }
+    });
+
+    const reloadBtn = actionRow.createEl("button", { cls: "manager-action-btn is-cta" });
+    if (typeof setIcon === "function") setIcon(reloadBtn, "power");
+    reloadBtn.createSpan({ text: "Reload Engine" });
+    reloadBtn.addEventListener("click", async () => {
+      await this.module.reloadSyncEngine();
+    });
+
+    const newModBtn = actionRow.createEl("button", { cls: "manager-action-btn" });
+    if (typeof setIcon === "function") setIcon(newModBtn, "plus");
+    newModBtn.createSpan({ text: "New Custom Module" });
+    newModBtn.addEventListener("click", async () => {
+      const id = prompt("Enter new module ID (slug):", "my-custom-module");
+      if (id && id.trim()) {
+        const cleanId = id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+        const path = `${this.app.vault.configDir}/plugins/sync-engine/modules/${cleanId}.js`;
+        if (await this.app.vault.adapter.exists(path)) {
+          new Notice(`Module '${cleanId}' already exists.`);
+        } else {
+          const template = `/*!\nname: ${cleanId}\nicon: puzzle\ndescription: Custom Sync Engine module\nversion: 1.0.0\n*/\n\nexport default class CustomModule {\n  constructor(ctx) {\n    this.ctx = ctx;\n  }\n  async start() {\n    console.log("[${cleanId}] Started!");\n  }\n  dispose() {\n    console.log("[${cleanId}] Disposed!");\n  }\n}\n`;
+          await this.app.vault.adapter.write(path, template);
+          if (typeof this.module.ctx?.loadAllModules === "function") await this.module.ctx.loadAllModules();
+          new Notice(`✓ Created custom module at ${path}`);
+          this.renderSyncModulesTab();
+        }
+      }
+    });
+
+    // 1. Module Sources Section
+    const sourcesCard = this.pageEl.createDiv("manager-card");
+    sourcesCard.style.flexDirection = "column";
+    sourcesCard.style.alignItems = "stretch";
+
+    const sHeader = sourcesCard.createDiv("sync-card-header");
+    sHeader.createEl("h4", { text: "Module Sources (Remote Catalogs)" });
+    sHeader.createEl("p", { cls: "text-muted", text: "Configure catalog endpoints from which third-party Sync Engine modules are discovered and updated." });
+
+    const sourcesList = sourcesCard.createDiv("sync-sources-list");
+    const configuredSources = this.module.ctx?.settings?.moduleSources || [];
+
+    configuredSources.forEach((src, idx) => {
+      const row = sourcesList.createDiv("sync-source-row");
+      row.createSpan({ cls: "sync-source-url", text: src });
+
+      if (src.includes("raw.githubusercontent.com")) {
+        row.createSpan({ cls: "manager-tag manager-tag--module", text: "Live Git Source" });
+      } else if (src.includes("sync.consensia.cc")) {
+        row.createSpan({ cls: "manager-tag", text: "Official" });
+      }
+
+      if (configuredSources.length > 1) {
+        const rmBtn = row.createEl("button", { cls: "manager-action-btn manager-action-btn--icon-only", attr: { "aria-label": "Remove source" } });
+        if (typeof setIcon === "function") setIcon(rmBtn, "trash");
+        rmBtn.addEventListener("click", async () => {
+          configuredSources.splice(idx, 1);
+          if (this.module.ctx?.saveSettings) await this.module.ctx.saveSettings();
+          new Notice("Removed source.");
+          this.renderSyncModulesTab();
+        });
+      }
+    });
+
+    // Add source input row
+    const addRow = sourcesCard.createDiv("sync-source-add-row");
+    addRow.style.display = "flex";
+    addRow.style.gap = "8px";
+    addRow.style.marginTop = "10px";
+
+    const addInput = addRow.createEl("input", {
+      type: "text",
+      cls: "manager-search-input",
+      placeholder: "https://raw.githubusercontent.com/username/repo/main/modules.json"
+    });
+    addInput.style.flex = "1";
+
+    const addBtn = addRow.createEl("button", { cls: "manager-action-btn is-cta", text: "Add Source" });
+    addBtn.addEventListener("click", async () => {
+      const url = addInput.value.trim();
+      if (!url) return;
+      if (!this.module.ctx.settings.moduleSources) this.module.ctx.settings.moduleSources = [];
+      if (!this.module.ctx.settings.moduleSources.includes(url)) {
+        this.module.ctx.settings.moduleSources.push(url);
+        if (this.module.ctx.saveSettings) await this.module.ctx.saveSettings();
+        if (typeof this.module.ctx.fetchSources === "function") await this.module.ctx.fetchSources(true);
+        new Notice("✓ Added module source.");
+        this.renderSyncModulesTab();
+      } else {
+        new Notice("Source already configured.");
+      }
+    });
+
+    // 2. Discovered & Remote Modules Catalog
+    const catCard = this.pageEl.createDiv("sync-modules-section");
+    catCard.createEl("h4", { text: "Discovered Modules Catalog", cls: "mt-4 mb-2" });
+
+    const discovered = this.module.ctx?.discoveredModules || new Map();
+    const installed = this.module.ctx?.settings?.modules || {};
+
+    if (discovered.size === 0) {
+      const empty = catCard.createDiv();
+      empty.style.padding = "24px";
+      empty.style.color = "var(--text-muted)";
+      empty.setText("No modules discovered yet. Click 'Rescan & Fetch Sources' above.");
+    }
+
+    discovered.forEach((meta, id) => {
+      const card = catCard.createDiv("manager-card");
+      const left = card.createDiv("manager-card__left");
+      const iconBox = left.createDiv("manager-card__icon");
+      if (typeof setIcon === "function") setIcon(iconBox, meta.icon || "layers");
+
+      const info = left.createDiv("manager-card__info");
+      const titleRow = info.createDiv("manager-card__title-row");
+      titleRow.createSpan({ cls: "manager-card__title", text: meta.name || id });
+      titleRow.createSpan({ cls: "manager-stat-pill", text: `v${meta.version || "1.0.0"}` });
+
+      const isInstalled = this.module.ctx?.loadedModules?.has(id) || !!installed[id];
+      const isEnabled = installed[id]?.enabled ?? true;
+
+      if (isInstalled) {
+        titleRow.createSpan({ cls: `manager-tag ${isEnabled ? "manager-tag--module" : ""}`, text: isEnabled ? "ENABLED" : "DISABLED" });
+      } else {
+        titleRow.createSpan({ cls: "manager-tag", text: "NOT INSTALLED" });
+      }
+
+      info.createDiv({ cls: "manager-card__desc", text: meta.description || "Sync Engine standalone module" });
+      info.createDiv({ cls: "manager-card__meta", text: `ID: ${id} · Source: ${meta.source || "Local"}` });
+
+      const right = card.createDiv("manager-card__right");
+
+      if (isInstalled) {
+        // Toggle Switch
+        const toggleWrapper = right.createDiv("manager-toggle-wrapper");
+        const toggle = toggleWrapper.createEl("input", { type: "checkbox", cls: "checkbox" });
+        toggle.checked = isEnabled;
+        toggle.addEventListener("change", async (e) => {
+          await this.module.toggleModule(id, e.target.checked);
+          new Notice(`${e.target.checked ? "Enabled" : "Disabled"} module '${meta.name || id}'.`);
+          this.renderSyncModulesTab();
+        });
+
+        // Hot Reload
+        const hrBtn = right.createEl("button", { cls: "manager-action-btn", attr: { "aria-label": "Hot-Reload module code" } });
+        if (typeof setIcon === "function") setIcon(hrBtn, "refresh-cw");
+        hrBtn.createSpan({ text: "Hot-Reload" });
+        hrBtn.addEventListener("click", async () => {
+          await this.module.hotReloadModule(id);
+          this.renderSyncModulesTab();
+        });
+
+        // Settings (if available)
+        const hasModuleSettings = Boolean(window.__syncEngineModuleSettingTabs__?.[id]);
+        if (hasModuleSettings) {
+          const setBtn = right.createEl("button", { cls: "manager-action-btn manager-action-btn--icon-only", attr: { "aria-label": "Open module settings" } });
+          if (typeof setIcon === "function") setIcon(setBtn, "settings");
+          setBtn.addEventListener("click", () => this.openPluginOrModuleSettings(id));
+        }
+
+        // Uninstall
+        const unBtn = right.createEl("button", { cls: "manager-action-btn manager-action-btn--icon-only", attr: { "aria-label": "Uninstall module" } });
+        if (typeof setIcon === "function") setIcon(unBtn, "trash");
+        unBtn.addEventListener("click", async () => {
+          if (confirm(`Uninstall module '${meta.name || id}'?`)) {
+            if (typeof this.module.ctx?.deleteModule === "function") {
+              await this.module.ctx.deleteModule(id);
+            } else if (typeof this.module.ctx?.unloadModule === "function") {
+              this.module.ctx.unloadModule(id);
+              const path = `${this.app.vault.configDir}/plugins/sync-engine/modules/${id}.js`;
+              if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
+              this.module.ctx.discoveredModules.delete(id);
+              if (this.module.ctx.saveSettings) await this.module.ctx.saveSettings();
+            }
+            new Notice(`Uninstalled module '${meta.name || id}'.`);
+            this.renderSyncModulesTab();
+          }
+        });
+      } else {
+        // Install button
+        const insBtn = right.createEl("button", { cls: "manager-action-btn is-cta" });
+        if (typeof setIcon === "function") setIcon(insBtn, "download");
+        insBtn.createSpan({ text: "Install" });
+        insBtn.addEventListener("click", async () => {
+          insBtn.disabled = true;
+          try {
+            if (typeof this.module.ctx?.downloadModule === "function") {
+              await this.module.ctx.downloadModule(meta, true);
+            }
+            new Notice(`✓ Installed module '${meta.name || id}'.`);
+            this.renderSyncModulesTab();
+          } catch (e) {
+            new Notice(`Installation failed: ${e.message}`);
+            insBtn.disabled = false;
+          }
+        });
+      }
+    });
   }
 
   // Tab 3: Delayed Startup (BPM)
@@ -2079,6 +2702,23 @@ class WorkflowManagerDashboardRenderer {
           }
         });
       }
+
+      // Publish to Git Catalog button
+      const publishBtn = right.createEl("button", {
+        cls: "manager-action-btn",
+        attr: { "aria-label": `Publish ${mod.name} to Git Catalog` }
+      });
+      if (typeof setIcon === "function") setIcon(publishBtn, "upload-cloud");
+      publishBtn.createSpan({ text: "Publish to Git" });
+      publishBtn.addEventListener("click", () => {
+        new PublishModuleToGitModal(this.app, this.module, {
+          id: mod.id,
+          name: mod.name,
+          version: mod.version,
+          description: mod.description,
+          repo: mod.repo
+        }).open();
+      });
     });
   }
 }
@@ -3019,6 +3659,178 @@ body.is-workflow-manager-popout-win .manager-header select {
 .manager-action-btn.is-update:hover {
     background: #15803d;
 }
+
+/* Quicklinks in header toolbar */
+.manager-toolbar__quicklinks {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    padding-left: 8px;
+    border-left: 1px solid var(--background-modifier-border);
+}
+
+.manager-quicklink-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.manager-quicklink-btn:hover {
+    color: var(--text-normal);
+    background: var(--background-modifier-hover);
+    border-color: var(--text-accent);
+}
+
+.manager-quicklink-btn--accent {
+    color: var(--text-on-accent) !important;
+    background: var(--interactive-accent) !important;
+    border-color: transparent !important;
+    font-weight: 600;
+}
+
+.manager-quicklink-btn--accent:hover {
+    background: var(--interactive-accent-hover) !important;
+    color: var(--text-on-accent) !important;
+}
+
+/* Profile Edit & Publish Modals */
+.profile-edit-modal, .publish-git-modal {
+    max-width: 640px !important;
+    width: 90vw !important;
+}
+
+.profile-edit-row, .publish-form-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+}
+
+.profile-edit-row label, .publish-form-row label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.profile-edit-row input, .publish-form-row input, .profile-edit-row select {
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-secondary);
+    color: var(--text-normal);
+}
+
+.profile-edit-tools {
+    display: flex;
+    gap: 8px;
+    margin: 14px 0 10px 0;
+}
+
+.profile-edit-lists {
+    max-height: 50vh;
+    overflow-y: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 10px;
+    background: var(--background-secondary);
+}
+
+.profile-section {
+    margin-bottom: 16px;
+}
+
+.profile-section__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 6px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.profile-section__header h4 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.profile-section__tools {
+    display: flex;
+    gap: 6px;
+}
+
+.profile-items-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 6px;
+}
+
+.profile-item-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    font-size: 12px;
+}
+
+.profile-item-row.is-enabled {
+    border-color: rgba(var(--interactive-accent-rgb), 0.4);
+    background: var(--background-primary-alt);
+}
+
+.profile-item-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 180px;
+}
+
+.profile-edit-footer, .publish-btn-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Sync Engine Module Management Tab Styles */
+.sync-modules-header {
+    margin-bottom: 14px;
+}
+
+.sync-source-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    margin-bottom: 6px;
+}
+
+.sync-source-url {
+    font-family: var(--font-monospace);
+    font-size: 12px;
+    word-break: break-all;
+    flex: 1;
+}
 `;
 
 // -------------------------------------------------------------
@@ -3475,15 +4287,21 @@ class WorkflowManagerModule {
       await this.ctx.saveSettings();
     }
 
-    // If live context has __getModule__, start or dispose
     try {
-      const loadedMod = this.ctx.loadedModules?.get(moduleId);
-      if (loadedMod) {
-        const inst = this.ctx.__getModule__(loadedMod);
-        if (enable && inst && typeof inst.start === "function") {
-          await inst.start();
-        } else if (!enable && inst && typeof inst.dispose === "function") {
-          await inst.dispose();
+      if (enable) {
+        if (typeof this.ctx.enableModule === "function") {
+          await this.ctx.enableModule(moduleId);
+        } else {
+          const meta = this.ctx.discoveredModules?.get(moduleId) || { id: moduleId, enabled: true };
+          if (typeof this.ctx.loadModule === "function") {
+            await this.ctx.loadModule(meta, true);
+          }
+        }
+      } else {
+        if (typeof this.ctx.disableModule === "function") {
+          await this.ctx.disableModule(moduleId);
+        } else if (typeof this.ctx.unloadModule === "function") {
+          this.ctx.unloadModule(moduleId);
         }
       }
     } catch (e) {
@@ -3605,7 +4423,7 @@ class WorkflowManagerModule {
   }
 
   async switchProfile(profileName, options = {}) {
-    const profile = this.moduleSettings.profiles[profileName];
+    const profile = this.moduleSettings?.profiles?.[profileName];
     if (!profile) {
       new Notice(`Workflow profile '${profileName}' not found!`);
       return;
@@ -3614,20 +4432,31 @@ class WorkflowManagerModule {
     this.moduleSettings.activeProfile = profileName;
     await this.saveSettings();
 
-    // 1. Switch plugins
-    if (profile.plugins && this.ctx.app.plugins) {
-      const appPlugins = this.ctx.app.plugins;
+    const appPlugins = this.ctx.app?.plugins;
+    let pluginsChanged = 0;
+    let modulesChanged = 0;
+
+    // 1. Switch plugins safely
+    if (profile.plugins && appPlugins?.manifests) {
+      const enabledSet = appPlugins.enabledPlugins || new Set();
       for (const [pluginId, shouldEnable] of Object.entries(profile.plugins)) {
-        const isEnabled = appPlugins.enabledPlugins?.has(pluginId);
-        if (shouldEnable && !isEnabled) {
+        // SAFETY LOCK: Never disable sync-engine or self
+        if (!shouldEnable && (pluginId === "sync-engine" || pluginId === this.getModuleId())) {
+          continue;
+        }
+
+        const isCurrentlyEnabled = enabledSet.has(pluginId);
+        if (shouldEnable && !isCurrentlyEnabled && appPlugins.manifests[pluginId]) {
           try {
             await appPlugins.enablePluginAndSave(pluginId);
+            pluginsChanged++;
           } catch (err) {
             console.error(`Failed to enable plugin ${pluginId}:`, err);
           }
-        } else if (!shouldEnable && isEnabled) {
+        } else if (!shouldEnable && isCurrentlyEnabled) {
           try {
             await appPlugins.disablePluginAndSave(pluginId);
+            pluginsChanged++;
           } catch (err) {
             console.error(`Failed to disable plugin ${pluginId}:`, err);
           }
@@ -3635,14 +4464,21 @@ class WorkflowManagerModule {
       }
     }
 
-    // 2. Switch modules
-    if (profile.modules && this.ctx.settings?.modules) {
+    // 2. Switch modules safely
+    if (profile.modules && this.ctx.discoveredModules) {
       for (const [moduleId, shouldEnable] of Object.entries(profile.modules)) {
-        await this.toggleModule(moduleId, shouldEnable);
+        if (!shouldEnable && moduleId === this.getModuleId()) {
+          continue; // SAFETY LOCK: Never disable self
+        }
+        const currentEnabled = this.ctx.settings?.modules?.[moduleId]?.enabled ?? true;
+        if (currentEnabled !== shouldEnable) {
+          await this.toggleModule(moduleId, shouldEnable);
+          modulesChanged++;
+        }
       }
     }
 
-    // 3. Switch workspace layout
+    // 3. Switch workspace layout safely
     if (profile.workspace && !options.skipWorkspaceSwitch && this.moduleSettings.syncWithWorkspaces) {
       const wsPlugin = this.ctx.app.internalPlugins?.getPluginById("workspaces");
       if (wsPlugin && wsPlugin.instance && typeof wsPlugin.instance.loadWorkspace === "function") {
@@ -4294,9 +5130,116 @@ export default ConvertedModule;
     return 0;
   }
 
+  // Package and publish a converted module directly to Git repository & modules.json catalog
+  async publishModuleToGit(config) {
+    const { id, name, version, description, icon, repoPath } = config;
+    if (!id || !repoPath) throw new Error("Module ID and Repository Path are required.");
+
+    const adapter = this.ctx.app?.vault?.adapter;
+    if (!adapter) throw new Error("Vault adapter not accessible.");
+
+    const modDir = `${repoPath}/modules`;
+    const catalogFile = `${repoPath}/modules.json`;
+
+    // 1. Read source JS code from local modules
+    const localModulePath = `${this.ctx.app.vault.configDir}/plugins/sync-engine/modules/${id}.js`;
+    let code = "";
+    if (await adapter.exists(localModulePath)) {
+      code = await adapter.read(localModulePath);
+    } else {
+      throw new Error(`Local module file not found at ${localModulePath}`);
+    }
+
+    // Strip any existing header
+    code = code.replace(/\/\*![\s\S]*?\*\/\s*/, "");
+
+    // 2. Prepend standard header
+    const header = `/*!\nname: ${name || id}\nicon: ${icon || "puzzle"}\ndescription: ${description || ""}\nversion: ${version || "1.0.0"}\nreadme: https://github.com/amarjt/sync-engine-modules\n*/\n\n`;
+    const fullCode = header + code.trim() + "\n";
+
+    // 3. Write to repository modules directory
+    let fs = null;
+    let crypto = null;
+    try {
+      if (typeof require === "function") {
+        fs = require("fs");
+        crypto = require("crypto");
+      }
+    } catch (_) {}
+
+    const targetModuleFile = `${modDir}/${id}.js`;
+    let sha256 = "";
+
+    if (fs && crypto) {
+      if (!fs.existsSync(modDir)) fs.mkdirSync(modDir, { recursive: true });
+      fs.writeFileSync(targetModuleFile, fullCode, "utf8");
+      sha256 = crypto.createHash("sha256").update(Buffer.from(fullCode, "utf8")).digest("hex");
+
+      // Update modules.json
+      let catalog = [];
+      if (fs.existsSync(catalogFile)) {
+        try {
+          catalog = JSON.parse(fs.readFileSync(catalogFile, "utf8"));
+        } catch (_) { catalog = []; }
+      }
+
+      const rawGitUrl = `https://raw.githubusercontent.com/amarjt/sync-engine-modules/main/modules/${id}.js`;
+      const existingIdx = catalog.findIndex((m) => m.id === id);
+      const newEntry = {
+        id,
+        name: name || id,
+        version: version || "1.0.0",
+        description: description || "",
+        icon: icon || "puzzle",
+        main: rawGitUrl,
+        minPluginVersion: "3.3.0",
+        integrity: sha256,
+        readme: "https://github.com/amarjt/sync-engine-modules"
+      };
+
+      if (existingIdx !== -1) {
+        catalog[existingIdx] = newEntry;
+      } else {
+        catalog.push(newEntry);
+      }
+
+      fs.writeFileSync(catalogFile, JSON.stringify(catalog, null, 2) + "\n", "utf8");
+
+      // Also ensure live local copy in vault has the formatted code
+      await adapter.write(localModulePath, fullCode);
+
+      // Verify moduleSources in Sync Engine settings
+      if (this.ctx.settings) {
+        if (!Array.isArray(this.ctx.settings.moduleSources)) this.ctx.settings.moduleSources = [];
+        const catalogUrl = "https://raw.githubusercontent.com/amarjt/sync-engine-modules/main/modules.json";
+        if (!this.ctx.settings.moduleSources.includes(catalogUrl)) {
+          this.ctx.settings.moduleSources.push(catalogUrl);
+          if (this.ctx.saveSettings) await this.ctx.saveSettings();
+        }
+      }
+
+      // Rescan modules in Sync Engine
+      if (typeof this.ctx.loadAllModules === "function") {
+        await this.ctx.loadAllModules();
+      }
+
+      return {
+        id,
+        name: name || id,
+        version: version || "1.0.0",
+        sha256,
+        targetModuleFile,
+        catalogFile
+      };
+    } else {
+      throw new Error("Node fs/crypto required to package module to repository.");
+    }
+  }
+
   async loadSettings() {
     const myId = this.getModuleId();
-    const stored = this.ctx.settings?.modules?.[myId]?.workflowSettings;
+    const modObj = this.ctx.settings?.modules?.[myId] || {};
+    const stored = modObj.workflowSettings || (modObj.profiles ? modObj : null);
     if (stored) {
       this.moduleSettings = Object.assign(this.moduleSettings, stored);
     }
@@ -4309,6 +5252,7 @@ export default ConvertedModule;
       this.ctx.settings.modules[myId] = { enabled: true };
     }
     this.ctx.settings.modules[myId].workflowSettings = this.moduleSettings;
+    Object.assign(this.ctx.settings.modules[myId], this.moduleSettings);
 
     if (this.ctx.saveSettings) {
       await this.ctx.saveSettings();
