@@ -2,7 +2,7 @@
 name: Workflow & Plugin Manager
 icon: layout-grid
 description: Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.
-version: 1.0.10
+version: 1.1.0
 readme: https://github.com/amarjt/sync-engine-modules
 */
 
@@ -57,38 +57,42 @@ function getVaultHash(name) {
   return (n >>> 0).toString(16);
 }
 
-// Universal Obsidian Module Loader Probe Fallback
+// Lightweight Debounce Utility
+function debounce(fn, waitMs = 120) {
+  let timeout = null;
+  return function(...args) {
+    if (timeout) clearTimeout(timeout);
+    timeout = setTimeout(() => {
+      timeout = null;
+      fn.apply(this, args);
+    }, waitMs);
+  };
+}
+
+// Universal Obsidian Module Loader Safe Resolver (Non-Invasive)
 async function ensureObsidianRequire(app) {
   if (typeof window !== "undefined" && typeof window.__obsidian_require__ === "function") {
     return window.__obsidian_require__;
   }
-  if (typeof require === "function") {
+  if (typeof window !== "undefined" && typeof window.require === "function") {
     try {
-      require("@codemirror/view");
-      window.__obsidian_require__ = require;
-      return require;
+      const obs = window.require("obsidian");
+      if (obs) {
+        window.__obsidian_require__ = window.require;
+        return window.require;
+      }
     } catch (_) {}
   }
-  if (!app || !app.plugins) return null;
-  try {
-    const probeId = "__probe_req_" + Date.now();
-    const origRead = app.vault.adapter.read;
-    app.vault.adapter.read = async function(path) {
-      if (path && path.includes(probeId)) {
-        return "module.exports = class ProbePlugin { constructor(app) { if (typeof window !== 'undefined') window.__obsidian_require__ = require; } };";
+  if (typeof require === "function") {
+    try {
+      const obs = require("obsidian");
+      if (obs) {
+        if (typeof window !== "undefined") window.__obsidian_require__ = require;
+        return require;
       }
-      return origRead.apply(this, arguments);
-    };
-    app.plugins.manifests[probeId] = { id: probeId, name: "Probe", version: "1.0.0", minAppVersion: "0.15.0", dir: probeId };
-    await app.plugins.loadPlugin(probeId);
-    try { await app.plugins.unloadPlugin(probeId); } catch (_) {}
-    delete app.plugins.manifests[probeId];
-    delete app.plugins.plugins[probeId];
-    app.vault.adapter.read = origRead;
-    return window.__obsidian_require__ || null;
-  } catch (err) {
-    return null;
+    } catch (_) {}
   }
+  return null;
 }
 
 // -------------------------------------------------------------
@@ -240,23 +244,41 @@ class EditModuleModal extends Modal {
 }
 
 class StandaloneModuleSettingModal extends (Modal || class {}) {
-  constructor(app, moduleItem, settingTab) {
+  constructor(app, moduleItem, settingTab, targetDoc = null) {
     super(app);
     this.moduleItem = moduleItem || {};
     this.settingTab = settingTab;
+    this.targetDoc = targetDoc;
   }
 
   onOpen() {
     const { contentEl, modalEl } = this;
+    const containerEl = modalEl?.parentElement || this.containerEl;
+
+    // Attach to active target document (ensures modal opens in front inside popout windows)
+    try {
+      const activeDoc = this.targetDoc || (typeof activeDocument !== "undefined" ? activeDocument : document);
+      if (containerEl && activeDoc && containerEl.ownerDocument !== activeDoc) {
+        activeDoc.body.appendChild(containerEl);
+      }
+    } catch (_) {}
+
+    // Highest z-index layer to guarantee it renders in front of any dashboard modal/view
+    if (containerEl) {
+      containerEl.style.zIndex = "2500";
+    }
+
     contentEl.empty();
     if (modalEl) {
       modalEl.addClass("mod-module-settings");
+      modalEl.style.zIndex = "2501";
       modalEl.style.width = "85vw";
       modalEl.style.maxWidth = "960px";
       modalEl.style.minHeight = "480px";
       modalEl.style.maxHeight = "85vh";
       modalEl.style.display = "flex";
       modalEl.style.flexDirection = "column";
+      modalEl.style.boxShadow = "0 24px 64px rgba(0, 0, 0, 0.45)";
     }
     contentEl.addClass("module-settings-modal-content");
     contentEl.style.display = "flex";
@@ -309,7 +331,7 @@ class StandaloneModuleSettingModal extends (Modal || class {}) {
     actions.style.display = "flex";
     actions.style.gap = "8px";
 
-    if (this.app?.setting?.open) {
+    if (this.app?.setting?.open && this.moduleItem?.type !== "module") {
       const openNativeBtn = actions.createEl("button", {
         cls: "manager-action-btn",
         text: "Open in Obsidian Settings"
@@ -374,6 +396,11 @@ class WorkflowManagerDashboardRenderer {
     this.activeTab = "items"; // "items" | "profiles" | "delayed" | "converter"
     this.filterStatus = "all"; // "all" | "enabled" | "disabled" | "modules" | "plugins" | "delayed"
     this.searchQuery = "";
+    this.converterSubTab = "community"; // "community" | "github" | "local" | "updates"
+    this.communitySortBy = "downloads"; // "downloads" | "name" | "updated"
+    this.communitySearchQuery = "";
+    this.communityCatalog = [];
+    this.githubRepoInput = "";
     this.containerEl = null;
     this.chromeEl = null;
     this.pageEl = null;
@@ -425,9 +452,6 @@ class WorkflowManagerDashboardRenderer {
       try {
         if (typeof mainWindow.focus === "function") mainWindow.focus();
       } catch (_) {}
-      try {
-        if (typeof activeWindow !== "undefined") activeWindow = mainWindow;
-      } catch (_) {}
     }
 
     if (this.app?.setting) {
@@ -454,27 +478,9 @@ class WorkflowManagerDashboardRenderer {
   }
 
   openPluginOrModuleSettings(id) {
-    // Only dismiss modal if running inside an in-vault modal dialog (never close popout window)
-    if (this.isModalHost && typeof this.onCloseCallback === "function") {
-      try {
-        this.onCloseCallback();
-      } catch (_) {}
-    }
+    const targetDoc = this.containerEl?.ownerDocument || document;
 
-    const mainWindow = (typeof window !== "undefined" && window.electron?.remote?.BrowserWindow)
-      ? window
-      : (this.app?.workspace?.containerEl?.ownerDocument?.defaultView || (typeof window !== "undefined" ? window : null));
-
-    if (mainWindow) {
-      try {
-        if (typeof mainWindow.focus === "function") mainWindow.focus();
-      } catch (_) {}
-      try {
-        if (typeof activeWindow !== "undefined") activeWindow = mainWindow;
-      } catch (_) {}
-    }
-
-    // 1. Locate module item metadata
+    // 1. Locate module or plugin item metadata
     let moduleItem = { id };
     if (this.module?.ctx?.discoveredModules?.has(id)) {
       moduleItem = this.module.ctx.discoveredModules.get(id);
@@ -485,14 +491,8 @@ class WorkflowManagerDashboardRenderer {
     // 2. Locate module settingTab
     let settingTab = null;
 
-    // Check settingTabs or pluginTabs in app.setting
-    if (this.app?.setting) {
-      settingTab = this.app.setting.pluginTabs?.find((t) => t && (t.id === id || t.plugin?.manifest?.id === id))
-        || this.app.setting.settingTabs?.find((t) => t && (t.id === id || t.id === "module:" + id));
-    }
-
-    // Check window registry
-    if (!settingTab && typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__?.[id]) {
+    // Check window registry (converted modules & standalone modules)
+    if (typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__?.[id]) {
       settingTab = window.__syncEngineModuleSettingTabs__[id];
     }
 
@@ -510,29 +510,34 @@ class WorkflowManagerDashboardRenderer {
       settingTab = this.app.plugins.plugins[id].settingTab;
     }
 
-    // 3. If community plugin manifest exists AND is enabled in community plugins, try opening native setting tab
-    const isCommunityPlugin = Boolean(this.app?.plugins?.manifests?.[id] && this.app?.plugins?.enabledPlugins?.has(id));
-    if (isCommunityPlugin && this.app?.setting?.open) {
-      try {
-        this.app.setting.open();
-        const tab = this.app.setting.openTabById ? this.app.setting.openTabById(id) : null;
-        if (tab) return;
-      } catch (err) {
-        console.warn("[WorkflowManager] Failed to open native plugin tab for " + id + ":", err);
-      }
+    // Check settingTabs or pluginTabs in app.setting
+    if (!settingTab && this.app?.setting) {
+      settingTab = this.app.setting.pluginTabs?.find((t) => t && (t.id === id || t.plugin?.manifest?.id === id))
+        || this.app.setting.settingTabs?.find((t) => t && (t.id === id || t.id === "module:" + id));
     }
 
-    // 4. For Converted Modules (or when native tab did not open), launch StandaloneModuleSettingModal!
+    // 3. PRIORITY: If settingTab is found, open StandaloneModuleSettingModal in front inside active window!
     if (settingTab) {
       try {
-        new StandaloneModuleSettingModal(this.app, moduleItem, settingTab).open();
+        const modal = new StandaloneModuleSettingModal(this.app, moduleItem, settingTab, targetDoc);
+        modal.open();
         return;
       } catch (err) {
         console.error("[WorkflowManager] Failed to open StandaloneModuleSettingModal for " + id + ":", err);
       }
     }
 
-    // 5. Fallback: try opening via Obsidian settings dialog
+    // 4. Fallback: Open native Obsidian Settings dialog at front
+    if (this.isModalHost && typeof this.onCloseCallback === "function") {
+      try {
+        this.onCloseCallback();
+      } catch (_) {}
+    }
+
+    const mainWindow = (typeof window !== "undefined" && window.electron?.remote?.BrowserWindow)
+      ? window
+      : (this.app?.workspace?.containerEl?.ownerDocument?.defaultView || (typeof window !== "undefined" ? window : null));
+
     if (this.app?.setting?.open) {
       try {
         this.app.setting.open();
@@ -629,7 +634,8 @@ class WorkflowManagerDashboardRenderer {
     addTab("items", "Plugins & Modules", "blocks");
     addTab("profiles", "Workflow Profiles", "workflow");
     addTab("delayed", "Delayed Startup", "zap");
-    addTab("converter", "Plugin Converter", "wrench");
+    const updateCount = this.module?.getAvailableUpdatesCount ? this.module.getAvailableUpdatesCount() : 0;
+    addTab("converter", updateCount > 0 ? `Plugin Converter (${updateCount})` : "Plugin Converter", "wrench");
 
     const tools = toolbar.createDiv("manager-toolbar__tools");
 
@@ -706,9 +712,13 @@ class WorkflowManagerDashboardRenderer {
       }
     });
     searchInput.style.paddingLeft = "38px";
-    searchInput.addEventListener("input", (e) => {
-      this.searchQuery = e.target.value.toLowerCase().trim();
+    const debouncedFilterSearch = debounce((val) => {
+      this.searchQuery = val.toLowerCase().trim();
       this.renderActiveTab();
+    }, 120);
+
+    searchInput.addEventListener("input", (e) => {
+      debouncedFilterSearch(e.target.value);
     });
 
     if (this.searchQuery) {
@@ -863,8 +873,16 @@ class WorkflowManagerDashboardRenderer {
       return;
     }
 
+    const fragment = (typeof document !== "undefined" && typeof document.createDocumentFragment === "function")
+      ? document.createDocumentFragment()
+      : null;
+
     filtered.forEach((item) => {
-      const card = this.pageEl.createDiv("manager-card");
+      const card = fragment ? document.createElement("div") : this.pageEl.createDiv("manager-card");
+      if (fragment) {
+        card.className = "manager-card";
+        fragment.appendChild(card);
+      }
 
       // Left info
       const left = card.createDiv("manager-card__left");
@@ -1343,6 +1361,10 @@ class WorkflowManagerDashboardRenderer {
         });
       }
     });
+
+    if (fragment) {
+      this.pageEl.appendChild(fragment);
+    }
   }
 
   // Tab 2: Workflow Profiles
@@ -1535,17 +1557,316 @@ class WorkflowManagerDashboardRenderer {
     });
   }
 
-  // Tab 4: Plugin-to-Module Converter
+  // Tab 4: Plugin-to-Module Converter & Discovery Hub
   renderConverterTab() {
+    this.pageEl.empty();
     const manifests = this.app.plugins?.manifests || {};
     const discovered = this.module.ctx?.discoveredModules || new Map();
+    const convertedMap = this.module.moduleSettings?.convertedModules || {};
 
     const topSection = this.pageEl.createDiv();
     topSection.style.marginBottom = "14px";
-    topSection.createEl("h3", { text: "Convert Community Plugins into Standalone Sync Engine Modules", cls: "m-0" });
+    topSection.createEl("h3", { text: "Plugin-to-Module Converter & Discovery Hub", cls: "m-0" });
     const desc = topSection.createEl("p", { cls: "text-muted" });
-    desc.setText("Wrap any installed Obsidian community plugin into a standalone Sync Engine module. Converted modules run inside Sync Engine's lifecycle, can be toggled per-workflow profile, and synced via Git/Cloud without community plugin overhead.");
+    desc.setText("Browse 1,500+ Obsidian community plugins, convert direct from GitHub repositories (BRAT-style), or wrap locally installed plugins into standalone Sync Engine modules with automated release update tracking.");
 
+    // Sub-Navigation bar
+    const subnav = this.pageEl.createDiv("converter-subnav");
+    const updateCount = this.module?.getAvailableUpdatesCount ? this.module.getAvailableUpdatesCount() : 0;
+    const trackedCount = Object.keys(convertedMap).length;
+
+    const subTabs = [
+      { id: "community", label: "Browse Community", icon: "globe" },
+      { id: "github", label: "GitHub Repo (BRAT)", icon: "download-cloud" },
+      { id: "installed", label: "Installed Plugins", icon: "hard-drive" },
+      { id: "updates", label: updateCount > 0 ? `Updates Available (${updateCount})` : `Converted & Updates (${trackedCount})`, icon: "refresh-cw", badge: updateCount > 0 }
+    ];
+
+    if (!this.converterSubTab) this.converterSubTab = "community";
+
+    subTabs.forEach((st) => {
+      const btn = subnav.createEl("button", {
+        cls: `converter-subnav__btn ${this.converterSubTab === st.id ? "is-active" : ""} ${st.badge ? "has-badge" : ""}`
+      });
+      if (typeof setIcon === "function") setIcon(btn, st.icon);
+      btn.createSpan({ text: st.label });
+      btn.addEventListener("click", () => {
+        this.converterSubTab = st.id;
+        this.renderConverterTab();
+      });
+    });
+
+    const bodyContainer = this.pageEl.createDiv();
+
+    if (this.converterSubTab === "community") {
+      this.renderCommunitySubTab(bodyContainer, discovered, convertedMap);
+    } else if (this.converterSubTab === "github") {
+      this.renderGitHubSubTab(bodyContainer, discovered, convertedMap);
+    } else if (this.converterSubTab === "installed") {
+      this.renderInstalledSubTab(bodyContainer, manifests, discovered, convertedMap);
+    } else if (this.converterSubTab === "updates") {
+      this.renderUpdatesSubTab(bodyContainer, discovered, convertedMap);
+    }
+  }
+
+  renderCommunitySubTab(container, discovered, convertedMap) {
+    const searchRow = container.createDiv("converter-search-row");
+    const searchInput = searchRow.createEl("input", {
+      type: "search",
+      cls: "converter-search-input",
+      placeholder: "Search 1,500+ Community Plugins by name, author, or keyword...",
+      value: this.communitySearchQuery || ""
+    });
+
+    const sortSelect = searchRow.createEl("select", { cls: "converter-sort-select" });
+    sortSelect.createEl("option", { value: "downloads", text: "Sort: Most Downloads" });
+    sortSelect.createEl("option", { value: "name", text: "Sort: Name (A-Z)" });
+    sortSelect.createEl("option", { value: "updated", text: "Sort: Recently Updated" });
+    sortSelect.value = this.communitySortBy || "downloads";
+
+    const refreshBtn = searchRow.createEl("button", {
+      cls: "manager-action-btn",
+      attr: { "aria-label": "Refresh Community Catalog" }
+    });
+    if (typeof setIcon === "function") setIcon(refreshBtn, "refresh-cw");
+    refreshBtn.createSpan({ text: "Refresh" });
+
+    const listContainer = container.createDiv();
+
+    const doRenderList = (catalog) => {
+      listContainer.empty();
+      let filtered = (catalog || []).slice();
+      const query = (this.communitySearchQuery || "").toLowerCase().trim();
+      if (query) {
+        filtered = filtered.filter(p => 
+          p._searchKey 
+            ? p._searchKey.includes(query)
+            : ((p.name && p.name.toLowerCase().includes(query)) ||
+               (p.id && p.id.toLowerCase().includes(query)) ||
+               (p.description && p.description.toLowerCase().includes(query)) ||
+               (p.author && p.author.toLowerCase().includes(query)))
+        );
+      }
+
+      const sortBy = this.communitySortBy || "downloads";
+      filtered.sort((a, b) => {
+        if (sortBy === "downloads") return (b.downloads || 0) - (a.downloads || 0);
+        if (sortBy === "updated") return (b.updated || 0) - (a.updated || 0);
+        return (a.name || "").localeCompare(b.name || "");
+      });
+
+      if (filtered.length === 0) {
+        const empty = listContainer.createDiv();
+        empty.style.padding = "40px";
+        empty.style.textAlign = "center";
+        empty.style.color = "var(--text-muted)";
+        empty.setText("No community plugins matched your search.");
+        return;
+      }
+
+      // Render top 50 matches for smooth performance
+      const pageSlice = filtered.slice(0, 50);
+      const fragment = (typeof document !== "undefined" && typeof document.createDocumentFragment === "function")
+        ? document.createDocumentFragment()
+        : null;
+
+      pageSlice.forEach(plugin => {
+        const isConverted = discovered.has(plugin.id);
+        const card = fragment ? document.createElement("div") : listContainer.createDiv("manager-card");
+        if (fragment) {
+          card.className = "manager-card";
+          fragment.appendChild(card);
+        }
+
+        const left = card.createDiv("manager-card__left");
+        const iconBox = left.createDiv("manager-card__icon");
+        if (typeof setIcon === "function") setIcon(iconBox, isConverted ? "check-circle" : "puzzle");
+        else iconBox.setText("🧩");
+
+        const info = left.createDiv("manager-card__info");
+        const titleRow = info.createDiv("manager-card__title-row");
+        titleRow.createSpan({ cls: "manager-card__title", text: plugin.name || plugin.id });
+
+        if (isConverted) {
+          titleRow.createSpan({ cls: "manager-tag manager-tag--module", text: "CONVERTED ✓" });
+        }
+
+        if (plugin.downloads) {
+          const dlText = plugin.downloads >= 1000000 
+            ? `${(plugin.downloads / 1000000).toFixed(1)}M` 
+            : plugin.downloads >= 1000 
+              ? `${Math.round(plugin.downloads / 1000)}K` 
+              : plugin.downloads;
+          const dlPill = titleRow.createSpan({ cls: "manager-stat-pill", text: `⬇ ${dlText}` });
+          dlPill.style.fontSize = "11px";
+        }
+
+        if (plugin.description) {
+          info.createDiv({ cls: "manager-card__desc", text: plugin.description });
+        }
+
+        info.createDiv({ cls: "manager-card__meta", text: `ID: ${plugin.id} · Author: ${plugin.author} · GitHub: ${plugin.repo}` });
+
+        const right = card.createDiv("manager-card__right");
+        const convertBtn = right.createEl("button", {
+          cls: `manager-action-btn ${isConverted ? "" : "is-cta"}`
+        });
+        if (typeof setIcon === "function") setIcon(convertBtn, "download");
+        const btnLabel = convertBtn.createSpan({ text: isConverted ? "Re-Convert" : "Convert & Install" });
+
+        convertBtn.addEventListener("click", async () => {
+          convertBtn.disabled = true;
+          btnLabel.setText("Downloading...");
+          try {
+            new Notice(`Fetching '${plugin.name}' from ${plugin.repo}...`);
+            const assets = await this.module.fetchRemotePluginAssets(plugin.repo);
+            btnLabel.setText("Converting...");
+            const res = await this.module.convertPluginToModule(plugin.id, {
+              remoteAssets: assets,
+              repo: plugin.repo,
+              source: "community"
+            });
+            new Notice(`✓ Successfully converted & installed '${res.name}' into Sync Engine!`);
+            this.renderHeader();
+            this.renderConverterTab();
+          } catch (err) {
+            console.error("[WorkflowManager] Remote conversion error:", err);
+            new Notice(`Failed to convert: ${err.message}`, 6000);
+            convertBtn.disabled = false;
+            btnLabel.setText(isConverted ? "Re-Convert" : "Convert & Install");
+          }
+        });
+      });
+
+      if (fragment) {
+        listContainer.appendChild(fragment);
+      }
+
+      if (filtered.length > 50) {
+        const moreNote = listContainer.createDiv();
+        moreNote.style.padding = "16px";
+        moreNote.style.textAlign = "center";
+        moreNote.style.color = "var(--text-faint)";
+        moreNote.style.fontSize = "12px";
+        moreNote.setText(`Showing top 50 of ${filtered.length} plugins. Refine query to narrow search.`);
+      }
+    };
+
+    const debouncedCommunitySearch = debounce((val) => {
+      this.communitySearchQuery = val;
+      doRenderList(this.communityCatalog || []);
+    }, 120);
+
+    searchInput.addEventListener("input", (e) => {
+      debouncedCommunitySearch(e.target.value);
+    });
+
+    sortSelect.addEventListener("change", (e) => {
+      this.communitySortBy = e.target.value;
+      doRenderList(this.communityCatalog || []);
+    });
+
+    refreshBtn.addEventListener("click", async () => {
+      refreshBtn.disabled = true;
+      try {
+        new Notice("Fetching community plugins catalog...");
+        this.communityCatalog = await this.module.fetchCommunityCatalog(true);
+        doRenderList(this.communityCatalog);
+        new Notice(`✓ Loaded ${this.communityCatalog.length} community plugins.`);
+      } catch (e) {
+        new Notice(`Failed to fetch catalog: ${e.message}`);
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    });
+
+    // Initial load
+    if (!this.communityCatalog || this.communityCatalog.length === 0) {
+      listContainer.empty();
+      const loading = listContainer.createDiv();
+      loading.style.padding = "40px";
+      loading.style.textAlign = "center";
+      loading.style.color = "var(--text-muted)";
+      loading.setText("Loading 1,500+ Obsidian Community Plugins...");
+
+      this.module.fetchCommunityCatalog(false).then((catalog) => {
+        this.communityCatalog = catalog;
+        doRenderList(this.communityCatalog);
+      }).catch((e) => {
+        loading.empty();
+        loading.setText(`Could not load community catalog: ${e.message}`);
+      });
+    } else {
+      doRenderList(this.communityCatalog);
+    }
+  }
+
+  renderGitHubSubTab(container, discovered, convertedMap) {
+    const box = container.createDiv();
+    box.style.padding = "20px";
+    box.style.background = "var(--background-secondary)";
+    box.style.border = "1px solid var(--background-modifier-border)";
+    box.style.borderRadius = "10px";
+    box.style.marginBottom = "20px";
+
+    box.createEl("h4", { text: "Import & Convert Plugin Direct from GitHub (BRAT-Style)", cls: "m-0" });
+    const p = box.createEl("p", { cls: "text-muted" });
+    p.setText("Enter any public GitHub repository (e.g. owner/repo or full URL). Assets (manifest.json, main.js, styles.css) will be fetched directly from GitHub releases and wrapped into a Sync Engine module.");
+
+    const row = box.createDiv();
+    row.style.display = "flex";
+    row.style.gap = "10px";
+    row.style.marginTop = "12px";
+
+    const input = row.createEl("input", {
+      type: "text",
+      cls: "converter-search-input",
+      placeholder: "e.g. eondrcode/obsidian-manager or https://github.com/...",
+      value: this.githubRepoInput || ""
+    });
+    input.style.flex = "1";
+
+    const fetchBtn = row.createEl("button", {
+      cls: "manager-action-btn is-cta"
+    });
+    if (typeof setIcon === "function") setIcon(fetchBtn, "download-cloud");
+    const btnLabel = fetchBtn.createSpan({ text: "Inspect & Convert" });
+
+    fetchBtn.addEventListener("click", async () => {
+      const repo = input.value.trim();
+      if (!repo) {
+        new Notice("Please enter a GitHub repository (owner/repo).");
+        return;
+      }
+      this.githubRepoInput = repo;
+      fetchBtn.disabled = true;
+      btnLabel.setText("Fetching...");
+
+      try {
+        new Notice(`Fetching release assets from ${repo}...`);
+        const assets = await this.module.fetchRemotePluginAssets(repo);
+        btnLabel.setText("Converting...");
+        const m = assets.manifest;
+        const res = await this.module.convertPluginToModule(m.id, {
+          remoteAssets: assets,
+          repo: assets.repo,
+          source: "github"
+        });
+        new Notice(`✓ Successfully converted & installed '${res.name}' (v${m.version || "1.0.0"})!`);
+        input.value = "";
+        this.githubRepoInput = "";
+        this.renderHeader();
+        this.renderConverterTab();
+      } catch (err) {
+        console.error("[WorkflowManager] GitHub conversion failed:", err);
+        new Notice(`GitHub conversion failed: ${err.message}`, 6000);
+        fetchBtn.disabled = false;
+        btnLabel.setText("Inspect & Convert");
+      }
+    });
+  }
+
+  renderInstalledSubTab(container, manifests, discovered, convertedMap) {
     const pluginIds = Object.keys(manifests).sort();
     const filteredIds = pluginIds.filter((id) => {
       if (this.searchQuery) {
@@ -1560,11 +1881,11 @@ class WorkflowManagerDashboardRenderer {
     });
 
     if (filteredIds.length === 0) {
-      const empty = this.pageEl.createDiv();
+      const empty = container.createDiv();
       empty.style.padding = "30px";
       empty.style.textAlign = "center";
       empty.style.color = "var(--text-muted)";
-      empty.setText("No plugins found to convert.");
+      empty.setText("No local plugins found to convert.");
       return;
     }
 
@@ -1572,7 +1893,7 @@ class WorkflowManagerDashboardRenderer {
       const m = manifests[id] || { name: id };
       const isAlreadyConverted = discovered.has(id);
 
-      const card = this.pageEl.createDiv("manager-card");
+      const card = container.createDiv("manager-card");
 
       const left = card.createDiv("manager-card__left");
       const iconBox = left.createDiv("manager-card__icon");
@@ -1611,7 +1932,7 @@ class WorkflowManagerDashboardRenderer {
           const result = await this.module.convertPluginToModule(id, { disableOriginal: true });
           new Notice(`✓ Successfully converted '${result.name}' to module!`);
           this.renderHeader();
-          this.renderActiveTab();
+          this.renderConverterTab();
         } catch (err) {
           console.error("Conversion failed:", err);
           new Notice(`Conversion error: ${err.message}`, 6000);
@@ -1619,6 +1940,113 @@ class WorkflowManagerDashboardRenderer {
           labelSpan.setText(isAlreadyConverted ? "Re-Convert" : "Convert to Module");
         }
       });
+    });
+  }
+
+  renderUpdatesSubTab(container, discovered, convertedMap) {
+    const topBar = container.createDiv();
+    topBar.style.display = "flex";
+    topBar.style.justifyContent = "space-between";
+    topBar.style.alignItems = "center";
+    topBar.style.marginBottom = "14px";
+    topBar.style.paddingBottom = "10px";
+    topBar.style.borderBottom = "1px solid var(--background-modifier-border)";
+
+    const titleDiv = topBar.createDiv();
+    titleDiv.createEl("h4", { text: "Manage Converted Modules & Updates", cls: "m-0" });
+    const p = titleDiv.createEl("p", { cls: "text-muted m-0" });
+    p.setText("Check upstream GitHub releases and update converted modules in-place with zero downtime.");
+
+    const checkBtn = topBar.createEl("button", { cls: "manager-action-btn is-cta" });
+    if (typeof setIcon === "function") setIcon(checkBtn, "refresh-cw");
+    const checkLabel = checkBtn.createSpan({ text: "Check for Updates" });
+
+    checkBtn.addEventListener("click", async () => {
+      checkBtn.disabled = true;
+      checkLabel.setText("Checking...");
+      try {
+        await this.module.checkForModuleUpdates(true);
+        this.renderHeader();
+        this.renderConverterTab();
+      } catch (e) {
+        new Notice(`Error checking updates: ${e.message}`);
+      } finally {
+        checkBtn.disabled = false;
+        checkLabel.setText("Check for Updates");
+      }
+    });
+
+    const entries = Object.values(convertedMap || {});
+    if (entries.length === 0) {
+      const empty = container.createDiv();
+      empty.style.padding = "40px";
+      empty.style.textAlign = "center";
+      empty.style.color = "var(--text-muted)";
+      empty.setText("No converted modules tracked yet. Use 'Browse Community' or 'GitHub Repo' to install modules.");
+      return;
+    }
+
+    entries.forEach((mod) => {
+      const card = container.createDiv("manager-card");
+
+      const left = card.createDiv("manager-card__left");
+      const iconBox = left.createDiv("manager-card__icon");
+      if (typeof setIcon === "function") setIcon(iconBox, mod.hasUpdate ? "arrow-up-circle" : "check-circle");
+
+      const info = left.createDiv("manager-card__info");
+      const titleRow = info.createDiv("manager-card__title-row");
+      titleRow.createSpan({ cls: "manager-card__title", text: mod.name || mod.id });
+
+      if (mod.hasUpdate) {
+        titleRow.createSpan({ cls: "manager-tag--update", text: `UPDATE: v${mod.version} ➔ v${mod.latestVersion}` });
+      } else {
+        titleRow.createSpan({ cls: "manager-stat-pill", text: `v${mod.version}` });
+      }
+
+      info.createDiv({ cls: "manager-card__meta", text: `ID: ${mod.id} · Repo: ${mod.repo || "Local"} · Source: ${mod.sourceType || "local"}` });
+
+      const right = card.createDiv("manager-card__right");
+
+      if (mod.hasUpdate) {
+        const updateBtn = right.createEl("button", {
+          cls: "manager-action-btn is-update",
+          attr: { "aria-label": `Update ${mod.name} to v${mod.latestVersion}` }
+        });
+        if (typeof setIcon === "function") setIcon(updateBtn, "arrow-up");
+        const uLabel = updateBtn.createSpan({ text: `Update to v${mod.latestVersion}` });
+
+        updateBtn.addEventListener("click", async () => {
+          updateBtn.disabled = true;
+          uLabel.setText("Updating...");
+          try {
+            await this.module.updateConvertedModule(mod.id);
+            new Notice(`✓ Successfully updated '${mod.name}' to v${mod.latestVersion}!`);
+            this.renderHeader();
+            this.renderConverterTab();
+          } catch (err) {
+            new Notice(`Update failed: ${err.message}`, 6000);
+            updateBtn.disabled = false;
+            uLabel.setText(`Update to v${mod.latestVersion}`);
+          }
+        });
+      } else {
+        const recheckBtn = right.createEl("button", {
+          cls: "manager-action-btn",
+          attr: { "aria-label": `Re-convert or refresh ${mod.name}` }
+        });
+        if (typeof setIcon === "function") setIcon(recheckBtn, "refresh-cw");
+        recheckBtn.createSpan({ text: "Re-Check" });
+
+        recheckBtn.addEventListener("click", async () => {
+          recheckBtn.disabled = true;
+          try {
+            await this.module.checkForModuleUpdates(true);
+            this.renderConverterTab();
+          } finally {
+            recheckBtn.disabled = false;
+          }
+        });
+      }
     });
   }
 }
@@ -1651,11 +2079,37 @@ class WorkflowManagerView extends (ItemView || View || class {}) {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("manager-view-container");
+
+    // Determine strictly if this view is in a separate popout window
+    try {
+      const isPopoutLeaf = Boolean(this.leaf && typeof this.leaf.getRoot === "function" && this.leaf.getRoot() !== this.app?.workspace?.rootSplit);
+      const isDifferentWindow = Boolean(contentEl.ownerDocument && contentEl.ownerDocument !== (this.app?.workspace?.containerEl?.ownerDocument || document));
+      const isPopout = isPopoutLeaf || isDifferentWindow;
+
+      if (isPopout) {
+        if (this.leaf?.parent?.containerEl) {
+          this.leaf.parent.containerEl.addClass("is-popout-manager-tabs");
+        }
+        if (contentEl.ownerDocument?.body) {
+          contentEl.ownerDocument.body.addClass("is-workflow-manager-popout-win");
+        }
+      }
+    } catch (_) {}
+
     // isModalHost = false: Popout window stays open and focused when opening settings
     this.renderer.mount(contentEl, null, null, false);
   }
 
   async onClose() {
+    try {
+      if (this.leaf?.parent?.containerEl) {
+        this.leaf.parent.containerEl.removeClass("is-popout-manager-tabs");
+      }
+      if (this.contentEl?.ownerDocument?.body) {
+        this.contentEl.ownerDocument.body.removeClass("is-workflow-manager-popout-win");
+        this.contentEl.ownerDocument.body.removeClass("is-workflow-manager-popout");
+      }
+    } catch (_) {}
     this.renderer.unmount();
     this.contentEl.empty();
   }
@@ -1750,11 +2204,19 @@ class WorkflowManagerSettingTab extends (PluginSettingTab || class {}) {
     // Open Dashboard Action Buttons
     new Setting(containerEl)
       .setName("Workflow & Plugin Manager Dashboard")
-      .setDesc("Open the full Better Manager (BPM) dashboard in its own dedicated popout window or as an overlay modal.")
+      .setDesc("Open the full Better Manager dashboard in a new tab (styled like Settings), dedicated window, or modal.")
+      .addButton((btn) => {
+        btn
+          .setButtonText("Open in New Tab")
+          .setCta()
+          .setIcon("layout-grid")
+          .onClick(() => {
+            this.module.openDashboardInTab();
+          });
+      })
       .addButton((btn) => {
         btn
           .setButtonText("Open in Own Window")
-          .setCta()
           .setIcon("external-link")
           .onClick(() => {
             this.module.openDashboardInOwnWindow();
@@ -1763,7 +2225,7 @@ class WorkflowManagerSettingTab extends (PluginSettingTab || class {}) {
       .addButton((btn) => {
         btn
           .setButtonText("Open as Modal")
-          .setIcon("layout-grid")
+          .setIcon("layers")
           .onClick(() => {
             new WorkflowManagerDashboardModal(this.app, this.module).open();
           });
@@ -1858,18 +2320,49 @@ class WorkflowManagerSettingTab extends (PluginSettingTab || class {}) {
 // Embedded BPM CSS Stylesheet with Fixed Heights & Scrolling
 // -------------------------------------------------------------
 const BPM_CSS = `
-/* Dedicated Popout View Container */
+/* Tab View Container: Styled like Settings Window */
 .manager-view-container {
     display: flex !important;
-    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
     width: 100% !important;
-    height: 100vh !important;
+    height: 100% !important;
     min-height: 0 !important;
-    max-height: 100vh !important;
-    padding: 0 !important;
+    max-height: 100% !important;
+    padding: 24px !important;
     margin: 0 !important;
+    box-sizing: border-box !important;
+    background-color: var(--background-secondary) !important;
     overflow: hidden !important;
+}
+
+.manager-view-container .manager-modal-shell {
+    display: flex !important;
+    flex-direction: column !important;
+    width: clamp(880px, 86vw, 1160px) !important;
+    max-width: 100% !important;
+    height: clamp(600px, 88vh, 940px) !important;
+    max-height: 100% !important;
+    border-radius: 12px !important;
     background-color: var(--background-primary) !important;
+    box-shadow: 0 20px 52px rgba(0, 0, 0, 0.32) !important;
+    border: 1px solid var(--background-modifier-border) !important;
+    overflow: hidden !important;
+}
+
+/* In Popout Window, shell fills popout window cleanly */
+body.is-workflow-manager-popout-win .manager-view-container {
+    padding: 0 !important;
+    background-color: var(--background-primary) !important;
+}
+body.is-workflow-manager-popout-win .manager-view-container .manager-modal-shell {
+    width: 100% !important;
+    height: 100% !important;
+    max-width: 100% !important;
+    max-height: 100% !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
 }
 
 /* Modal Window Container */
@@ -1886,6 +2379,15 @@ const BPM_CSS = `
     background-color: var(--background-primary);
     box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
     overflow: hidden !important;
+}
+
+/* Standalone Module Setting Modal: Always in front */
+.modal-container:has(.mod-module-settings) {
+    z-index: 2500 !important;
+}
+.modal.mod-module-settings {
+    z-index: 2501 !important;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45) !important;
 }
 
 .modal-content.manager-modal-shell-host {
@@ -2378,6 +2880,113 @@ const BPM_CSS = `
 .manager-action-btn.is-cta:hover {
     background: var(--interactive-accent-hover);
 }
+
+/* Popout Window: Settings Panel Mode (Strip Tab Bar & New Tab Buttons only for popout manager) */
+.workspace-tabs.is-popout-manager-tabs > .workspace-tab-header-container {
+    display: none !important;
+}
+.workspace-tabs.is-popout-manager-tabs {
+    border-top: none !important;
+    padding-top: 0 !important;
+}
+.workspace-tabs.is-popout-manager-tabs > .workspace-tab-container {
+    height: 100% !important;
+    padding: 0 !important;
+}
+body.is-workflow-manager-popout-win .manager-header {
+    -webkit-app-region: drag;
+}
+body.is-workflow-manager-popout-win .manager-header button,
+body.is-workflow-manager-popout-win .manager-header input,
+body.is-workflow-manager-popout-win .manager-header select {
+    -webkit-app-region: no-drag;
+}
+
+/* Converter Sub-Navigation & Elements */
+.converter-subnav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0 14px 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+.converter-subnav__btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-secondary);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+.converter-subnav__btn:hover {
+    color: var(--text-normal);
+    background: var(--background-modifier-hover);
+}
+.converter-subnav__btn.is-active {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+    border-color: transparent;
+    font-weight: 600;
+}
+.converter-subnav__btn.has-badge {
+    border-color: #22c55e;
+    color: #22c55e;
+}
+.converter-search-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+.converter-search-input {
+    flex: 1 1 240px;
+    padding: 7px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 13px;
+}
+.converter-search-input:focus {
+    border-color: var(--interactive-accent);
+    outline: none;
+}
+.converter-sort-select {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--background-modifier-border);
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 12px;
+    cursor: pointer;
+}
+.manager-tag--update {
+    background: color-mix(in srgb, #22c55e 18%, transparent);
+    color: #22c55e;
+    border: 1px solid color-mix(in srgb, #22c55e 40%, transparent);
+    font-weight: 600;
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 10px;
+}
+.manager-action-btn.is-update {
+    background: #16a34a;
+    color: #ffffff;
+    border-color: transparent;
+    font-weight: 600;
+}
+.manager-action-btn.is-update:hover {
+    background: #15803d;
+}
 `;
 
 // -------------------------------------------------------------
@@ -2390,11 +2999,16 @@ class WorkflowManagerModule {
     this.settingTab = null;
     this.originalLoadWorkspace = null;
 
+    this.communityCatalogCache = null;
+    this.communityCatalogExpiresAt = 0;
+
     // Default configuration & profile store
     this.moduleSettings = {
       activeProfile: "Default",
       syncWithWorkspaces: true,
       delayedPlugins: [],
+      convertedModules: {},
+      autoCheckModuleUpdates: true,
       profiles: {
         "Default": {
           workspace: "",
@@ -2499,6 +3113,33 @@ class WorkflowManagerModule {
     }
   }
 
+  // Open the dashboard in a new tab (styled like the Settings window)
+  async openDashboardInTab() {
+    const app = this.ctx.app;
+    if (!app || !app.workspace) return;
+    this.registerDashboardView();
+
+    let targetLeaf = null;
+    app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.view && typeof leaf.view.getViewType === "function" && leaf.view.getViewType() === WORKFLOW_MANAGER_VIEW_TYPE) {
+        targetLeaf = leaf;
+      }
+    });
+
+    if (targetLeaf) {
+      app.workspace.revealLeaf(targetLeaf);
+      return targetLeaf;
+    }
+
+    const leaf = app.workspace.getLeaf(true);
+    await leaf.setViewState({
+      type: WORKFLOW_MANAGER_VIEW_TYPE,
+      active: true
+    });
+    app.workspace.revealLeaf(leaf);
+    return leaf;
+  }
+
   // Open the dashboard in its own dedicated native OS popout window
   async openDashboardInOwnWindow() {
     const app = this.ctx.app;
@@ -2510,15 +3151,8 @@ class WorkflowManagerModule {
     // Check if view is already open in any leaf
     let targetLeaf = null;
     app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.view && leaf.view.getViewType && leaf.view.getViewType() === WORKFLOW_MANAGER_VIEW_TYPE) {
-        if (leaf.view instanceof WorkflowManagerView || (leaf.view.renderer && typeof leaf.view.renderer.mount === "function")) {
-          targetLeaf = leaf;
-        } else {
-          // Dead unknown pane ("Plugin no longer active")
-          try {
-            leaf.detach();
-          } catch (_) {}
-        }
+      if (leaf.view && typeof leaf.view.getViewType === "function" && leaf.view.getViewType() === WORKFLOW_MANAGER_VIEW_TYPE) {
+        targetLeaf = leaf;
       }
     });
 
@@ -2576,45 +3210,7 @@ class WorkflowManagerModule {
   }
 
   deduplicateSettingTabs() {
-    try {
-      const setting = this.ctx?.app?.setting || this.app?.setting;
-      if (!setting || !Array.isArray(setting.pluginTabs)) return;
-
-      const seenIds = new Set();
-      const duplicates = [];
-
-      for (const tab of setting.pluginTabs) {
-        if (!tab) continue;
-        const id = tab.id || tab.plugin?.manifest?.id;
-        if (!id) continue;
-
-        if (seenIds.has(id)) {
-          duplicates.push(tab);
-        } else {
-          seenIds.add(id);
-        }
-      }
-
-      for (const dup of duplicates) {
-        try {
-          if (typeof setting.removeSettingTab === "function") {
-            setting.removeSettingTab(dup);
-          } else {
-            const idx = setting.pluginTabs.indexOf(dup);
-            if (idx !== -1) setting.pluginTabs.splice(idx, 1);
-            if (dup.navEl && typeof dup.navEl.detach === "function") {
-              dup.navEl.detach();
-            }
-          }
-        } catch (_) {}
-      }
-
-      if (duplicates.length > 0 && typeof setting.updatePluginSection === "function") {
-        try { setting.updatePluginSection(); } catch (_) {}
-      }
-    } catch (err) {
-      console.warn("[WorkflowManager] Failed to deduplicate setting tabs:", err);
-    }
+    // Zero-leak isolation: Do not mutate Obsidian's internal app.setting.pluginTabs
   }
 
   // Auto-heal module integrity and moduleSettings in Sync Engine
@@ -2720,6 +3316,14 @@ class WorkflowManagerModule {
 
     if (this.ctx.addCommand) {
       this.ctx.addCommand({
+        id: "workflow-manager-open-tab",
+        name: "Workflow Manager: Open Dashboard in New Tab",
+        callback: () => {
+          this.openDashboardInTab();
+        }
+      });
+
+      this.ctx.addCommand({
         id: "workflow-manager-open-window",
         name: "Workflow Manager: Open Dashboard in New Window",
         callback: () => {
@@ -2729,7 +3333,7 @@ class WorkflowManagerModule {
 
       this.ctx.addCommand({
         id: "workflow-manager-open-modal",
-        name: "Workflow Manager: Open Dashboard Modal",
+        name: "Workflow Manager: Open Dashboard Modal (Settings Window)",
         callback: () => {
           new WorkflowManagerDashboardModal(this.ctx.app, this).open();
         }
@@ -2791,6 +3395,13 @@ class WorkflowManagerModule {
 
     // Execute Delayed Startup optimization if configured
     this.executeDelayedStartup();
+
+    // Background module updates check (delayed by 8s to not affect initial boot)
+    if (this.moduleSettings?.autoCheckModuleUpdates !== false) {
+      window.setTimeout(() => {
+        this.checkForModuleUpdates(false).catch(() => {});
+      }, 8000);
+    }
   };
 
   dispose = async () => {
@@ -2931,7 +3542,8 @@ class WorkflowManagerModule {
       const wsPlugin = this.ctx.app.internalPlugins?.getPluginById("workspaces");
       if (wsPlugin && wsPlugin.instance && typeof wsPlugin.instance.loadWorkspace === "function") {
         try {
-          await this.originalLoadWorkspace.call(wsPlugin.instance, profile.workspace);
+          const fn = this.originalLoadWorkspace || wsPlugin.instance.loadWorkspace;
+          await fn.call(wsPlugin.instance, profile.workspace);
         } catch (e) {
           console.warn(`Could not load workspace '${profile.workspace}':`, e);
         }
@@ -2997,36 +3609,48 @@ class WorkflowManagerModule {
     }, 1000);
   }
 
-  // Convert an installed Obsidian community plugin into a Sync Engine module
+  // Convert an installed or remote community/GitHub plugin into a Sync Engine module
   async convertPluginToModule(pluginId, options = {}) {
     const app = this.ctx.app;
     const adapter = app.vault.adapter;
-    const pluginFolder = `${app.vault.configDir}/plugins/${pluginId}`;
 
-    if (!(await adapter.exists(pluginFolder))) {
-      throw new Error(`Plugin directory not found: ${pluginFolder}`);
-    }
-
-    // Read manifest
-    const manifestPath = `${pluginFolder}/manifest.json`;
-    if (!(await adapter.exists(manifestPath))) {
-      throw new Error(`Plugin manifest.json not found in ${pluginFolder}`);
-    }
-    const manifestRaw = await adapter.read(manifestPath);
-    const manifest = JSON.parse(manifestRaw);
-
-    // Read main.js
-    const mainPath = `${pluginFolder}/main.js`;
-    if (!(await adapter.exists(mainPath))) {
-      throw new Error(`Plugin main.js not found in ${pluginFolder}`);
-    }
-    const mainSource = await adapter.read(mainPath);
-
-    // Read styles.css if present
+    let manifest = null;
+    let mainSource = "";
     let stylesSource = "";
-    const stylesPath = `${pluginFolder}/styles.css`;
-    if (await adapter.exists(stylesPath)) {
-      stylesSource = await adapter.read(stylesPath);
+    let repo = options.repo || "";
+
+    if (options.remoteAssets) {
+      manifest = options.remoteAssets.manifest;
+      mainSource = options.remoteAssets.mainJs;
+      stylesSource = options.remoteAssets.stylesCss || "";
+      repo = options.remoteAssets.repo || repo;
+    } else {
+      const pluginFolder = `${app.vault.configDir}/plugins/${pluginId}`;
+
+      if (!(await adapter.exists(pluginFolder))) {
+        throw new Error(`Plugin directory not found: ${pluginFolder}`);
+      }
+
+      // Read manifest
+      const manifestPath = `${pluginFolder}/manifest.json`;
+      if (!(await adapter.exists(manifestPath))) {
+        throw new Error(`Plugin manifest.json not found in ${pluginFolder}`);
+      }
+      const manifestRaw = await adapter.read(manifestPath);
+      manifest = JSON.parse(manifestRaw);
+
+      // Read main.js
+      const mainPath = `${pluginFolder}/main.js`;
+      if (!(await adapter.exists(mainPath))) {
+        throw new Error(`Plugin main.js not found in ${pluginFolder}`);
+      }
+      mainSource = await adapter.read(mainPath);
+
+      // Read styles.css if present
+      const stylesPath = `${pluginFolder}/styles.css`;
+      if (await adapter.exists(stylesPath)) {
+        stylesSource = await adapter.read(stylesPath);
+      }
     }
 
     const moduleName = options.targetName || manifest.name || pluginId;
@@ -3050,33 +3674,25 @@ async function ensureObsidianRequire(app) {
   if (typeof window !== "undefined" && typeof window.__obsidian_require__ === "function") {
     return window.__obsidian_require__;
   }
-  if (typeof require === "function") {
+  if (typeof window !== "undefined" && typeof window.require === "function") {
     try {
-      require("@codemirror/view");
-      window.__obsidian_require__ = require;
-      return require;
+      const obs = window.require("obsidian");
+      if (obs) {
+        window.__obsidian_require__ = window.require;
+        return window.require;
+      }
     } catch (_) {}
   }
-  if (!app || !app.plugins) return null;
-  try {
-    const probeId = "__probe_req_" + Date.now();
-    const origRead = app.vault.adapter.read;
-    app.vault.adapter.read = async function(path) {
-      if (path && path.includes(probeId)) {
-        return "module.exports = class ProbePlugin { constructor(app) { if (typeof window !== 'undefined') window.__obsidian_require__ = require; } };";
+  if (typeof require === "function") {
+    try {
+      const obs = require("obsidian");
+      if (obs) {
+        if (typeof window !== "undefined") window.__obsidian_require__ = require;
+        return require;
       }
-      return origRead.apply(this, arguments);
-    };
-    app.plugins.manifests[probeId] = { id: probeId, name: "Probe", version: "1.0.0", minAppVersion: "0.15.0", dir: probeId };
-    await app.plugins.loadPlugin(probeId);
-    try { await app.plugins.unloadPlugin(probeId); } catch (_) {}
-    delete app.plugins.manifests[probeId];
-    delete app.plugins.plugins[probeId];
-    app.vault.adapter.read = origRead;
-    return window.__obsidian_require__ || null;
-  } catch (err) {
-    return null;
+    } catch (_) {}
   }
+  return null;
 }
 
 // Sandboxed execution of original plugin CommonJS source
@@ -3207,99 +3823,41 @@ class ConvertedModule {
       };
 
       // 2. Safe app.plugins integration without polluting manifests or Community Plugins list
-      if (this.app.plugins) {
-        // Ensure community plugin is not running simultaneously
-        if (this.app.plugins.enabledPlugins && typeof this.app.plugins.enabledPlugins.delete === "function") {
-          this.app.plugins.enabledPlugins.delete(pluginId);
-        }
-        // Proxy app.plugins.getPlugin so dependent plugins/commands can access this.instance safely
-        const origGetPlugin = typeof this.app.plugins.getPlugin === "function" ? this.app.plugins.getPlugin.bind(this.app.plugins) : null;
-        if (origGetPlugin) {
-          this.app.plugins.getPlugin = (id) => {
-            if (id === pluginId) return this.instance;
-            return origGetPlugin(id);
-          };
-          this.cleanups.push(() => {
-            if (this.app.plugins) this.app.plugins.getPlugin = origGetPlugin;
-          });
-        }
+      if (this.app.plugins && this.app.plugins.plugins) {
+        this.app.plugins.plugins[pluginId] = this.instance;
+        this.cleanups.push(() => {
+          if (this.app.plugins?.plugins && this.app.plugins.plugins[pluginId] === this.instance) {
+            delete this.app.plugins.plugins[pluginId];
+          }
+        });
       }
 
-      // 3. Setting tab deduplication helper
-      const purgeSettingTabs = () => {
-        if (!this.app.setting) return;
-        const targetId = ${JSON.stringify(pluginId)};
-        const matches = (t) => t && (t.id === targetId || t.plugin?.manifest?.id === targetId);
+      // 3. Isolated SettingTab registration for StandaloneModuleSettingModal (Zero pollution of native Obsidian settings)
+      this.instance.addSettingTab = (settingTab) => {
+        if (!settingTab.id) settingTab.id = ${JSON.stringify(pluginId)};
+        settingTab.name = manifest.name;
+        this.instance.settingTab = settingTab;
+        this.settingTab = settingTab;
 
-        if (Array.isArray(this.app.setting.pluginTabs)) {
-          const staleTabs = this.app.setting.pluginTabs.filter(matches);
-          for (const tab of staleTabs) {
-            try {
-              if (typeof this.app.setting.removeSettingTab === "function") {
-                this.app.setting.removeSettingTab(tab);
-              } else {
-                const idx = this.app.setting.pluginTabs.indexOf(tab);
-                if (idx !== -1) this.app.setting.pluginTabs.splice(idx, 1);
-                if (tab.navEl && typeof tab.navEl.detach === "function") tab.navEl.detach();
-              }
-            } catch (_) {}
+        if (typeof window !== "undefined") {
+          if (!window.__syncEngineModuleSettingTabs__) window.__syncEngineModuleSettingTabs__ = {};
+          window.__syncEngineModuleSettingTabs__[pluginId] = settingTab;
+        }
+
+        this.cleanups.push(() => {
+          if (this.instance) this.instance.settingTab = null;
+          this.settingTab = null;
+          if (typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__) {
+            delete window.__syncEngineModuleSettingTabs__[pluginId];
           }
-        }
-        if (typeof this.app.setting.updatePluginSection === "function") {
-          try { this.app.setting.updatePluginSection(); } catch (_) {}
-        }
+        });
       };
 
-      // Clean up any stale leftover tabs from prior sessions
-      purgeSettingTabs();
-
-      // 4. Intercept addSettingTab to enforce standalone registration and single-tab invariant
-      const origAddSettingTab = this.instance.addSettingTab?.bind(this.instance);
-      if (origAddSettingTab) {
-        this.instance.addSettingTab = (settingTab) => {
-          if (!settingTab.id) settingTab.id = ${JSON.stringify(pluginId)};
-          settingTab.name = manifest.name;
-          this.instance.settingTab = settingTab;
-          this.settingTab = settingTab;
-
-          // Register in window registry for immediate access by StandaloneModuleSettingModal
-          if (typeof window !== "undefined") {
-            if (!window.__syncEngineModuleSettingTabs__) window.__syncEngineModuleSettingTabs__ = {};
-            window.__syncEngineModuleSettingTabs__[pluginId] = settingTab;
-          }
-
-          // Purge any pre-existing duplicate before adding
-          purgeSettingTabs();
-          origAddSettingTab(settingTab);
-          if (this.app.setting) {
-            if (Array.isArray(this.app.setting.pluginTabs) && !this.app.setting.pluginTabs.includes(settingTab)) {
-              this.app.setting.pluginTabs.push(settingTab);
-            }
-            if (typeof this.app.setting.updatePluginSection === "function") {
-              try { this.app.setting.updatePluginSection(); } catch (_) {}
-            }
-          }
-          this.cleanups.push(() => {
-            purgeSettingTabs();
-            if (this.instance) this.instance.settingTab = null;
-            this.settingTab = null;
-            if (typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__) {
-              delete window.__syncEngineModuleSettingTabs__[pluginId];
-            }
-          });
-        };
-      }
-
-      // 5. Proper Component Lifecycle Load
+      // 4. Proper Component Lifecycle Load
       if (typeof this.instance.load === "function") {
         await this.instance.load();
       } else if (typeof this.instance.onload === "function") {
         await this.instance.onload();
-      }
-
-      // Refresh setting sidebar if settings dialog is open
-      if (this.app.setting && typeof this.app.setting.updatePluginSection === "function") {
-        try { this.app.setting.updatePluginSection(); } catch (_) {}
       }
 
       console.log("[ConvertedModule] Successfully loaded converted module " + ${JSON.stringify(pluginId)});
@@ -3313,7 +3871,7 @@ class ConvertedModule {
     if (this.instance) {
       try {
         if (typeof this.instance.unload === "function") {
-          this.instance.unload();
+          await this.instance.unload();
         } else if (typeof this.instance.onunload === "function") {
           await this.instance.onunload();
         }
@@ -3331,26 +3889,10 @@ class ConvertedModule {
     if (typeof window !== "undefined" && window.__syncEngineModuleSettingTabs__) {
       delete window.__syncEngineModuleSettingTabs__[${JSON.stringify(pluginId)}];
     }
-
-    // Force purge any lingering setting tabs on dispose
-    if (this.app.setting && Array.isArray(this.app.setting.pluginTabs)) {
-      const targetId = ${JSON.stringify(pluginId)};
-      const staleTabs = this.app.setting.pluginTabs.filter(t => t && (t.id === targetId || t.plugin?.manifest?.id === targetId));
-      for (const tab of staleTabs) {
-        try {
-          if (typeof this.app.setting.removeSettingTab === "function") {
-            this.app.setting.removeSettingTab(tab);
-          } else {
-            const idx = this.app.setting.pluginTabs.indexOf(tab);
-            if (idx !== -1) this.app.setting.pluginTabs.splice(idx, 1);
-            if (tab.navEl && typeof tab.navEl.detach === "function") tab.navEl.detach();
-          }
-        } catch (_) {}
-      }
-      if (typeof this.app.setting.updatePluginSection === "function") {
-        try { this.app.setting.updatePluginSection(); } catch (_) {}
-      }
+    if (this.app?.plugins?.plugins && this.app.plugins.plugins[${JSON.stringify(pluginId)}] === this.instance) {
+      delete this.app.plugins.plugins[${JSON.stringify(pluginId)}];
     }
+  };
   };
 }
 
@@ -3434,11 +3976,217 @@ export default ConvertedModule;
       }
     }
 
+    // Record converted module provenance for auto-updates & discovery
+    if (!this.moduleSettings.convertedModules) {
+      this.moduleSettings.convertedModules = {};
+    }
+    this.moduleSettings.convertedModules[pluginId] = {
+      id: pluginId,
+      name: moduleName,
+      version: moduleVer,
+      repo: repo || options.repo || manifest.repo || "",
+      sourceType: options.source || (options.remoteAssets ? "remote" : "local"),
+      convertedAt: Date.now(),
+      lastCheckedAt: Date.now(),
+      latestVersion: moduleVer,
+      hasUpdate: false
+    };
+
+    if (this.ctx.saveSettings) {
+      await this.ctx.saveSettings();
+    }
+
     return {
       id: pluginId,
       name: moduleName,
       file: targetModuleFile
     };
+  }
+
+  getAvailableUpdatesCount() {
+    const converted = this.moduleSettings?.convertedModules || {};
+    return Object.values(converted).filter((m) => m && m.hasUpdate).length;
+  }
+
+  // Fetch official community plugins catalog + download stats
+  async fetchCommunityCatalog(force = false) {
+    const now = Date.now();
+    if (!force && this.communityCatalogCache && now < this.communityCatalogExpiresAt) {
+      return this.communityCatalogCache;
+    }
+
+    try {
+      const [pluginsRes, statsRes] = await Promise.all([
+        fetch("https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/community-plugins.json"),
+        fetch("https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/community-plugin-stats.json").catch(() => null)
+      ]);
+
+      if (!pluginsRes.ok) throw new Error(`HTTP ${pluginsRes.status} fetching community plugins catalog`);
+      const plugins = await pluginsRes.json();
+      let stats = {};
+      if (statsRes && statsRes.ok) {
+        try { stats = await statsRes.json(); } catch (_) {}
+      }
+
+      const catalog = plugins.map((p) => {
+        const s = stats[p.id] || {};
+        const name = p.name || p.id;
+        const author = p.author || "Unknown";
+        const desc = p.description || "";
+        return {
+          id: p.id,
+          name,
+          author,
+          description: desc,
+          repo: p.repo || "",
+          downloads: s.downloads || 0,
+          updated: s.updated || 0,
+          _searchKey: `${name} ${p.id} ${desc} ${author}`.toLowerCase()
+        };
+      });
+
+      this.communityCatalogCache = catalog;
+      this.communityCatalogExpiresAt = now + 12 * 60 * 60 * 1000; // 12 hours cache
+      return catalog;
+    } catch (err) {
+      console.warn("[WorkflowManager] Failed to fetch community catalog:", err);
+      if (this.communityCatalogCache) return this.communityCatalogCache;
+      throw err;
+    }
+  }
+
+  // Fetch release assets (manifest.json, main.js, styles.css) from GitHub
+  async fetchRemotePluginAssets(repo, version = null) {
+    if (!repo) throw new Error("GitHub repository is required (owner/repo)");
+    const cleanRepo = repo.replace(/^https?:\/\/github\.com\//i, "").replace(/\/$/, "");
+
+    const baseReleaseUrl = version 
+      ? `https://github.com/${cleanRepo}/releases/download/${version}` 
+      : `https://github.com/${cleanRepo}/releases/latest/download`;
+
+    let manifest = null;
+    let mainJs = "";
+    let stylesCss = "";
+
+    try {
+      const manifestRes = await fetch(`${baseReleaseUrl}/manifest.json`);
+      if (manifestRes.ok) {
+        manifest = await manifestRes.json();
+      }
+    } catch (_) {}
+
+    if (!manifest) {
+      const rawManifestRes = await fetch(`https://raw.githubusercontent.com/${cleanRepo}/HEAD/manifest.json`);
+      if (!rawManifestRes.ok) throw new Error(`Could not find manifest.json in ${cleanRepo}`);
+      manifest = await rawManifestRes.json();
+    }
+
+    let mainRes = await fetch(`${baseReleaseUrl}/main.js`);
+    if (mainRes.ok) {
+      mainJs = await mainRes.text();
+    } else {
+      mainRes = await fetch(`https://raw.githubusercontent.com/${cleanRepo}/HEAD/main.js`);
+      if (!mainRes.ok) throw new Error(`Could not find main.js in ${cleanRepo}`);
+      mainJs = await mainRes.text();
+    }
+
+    try {
+      const stylesRes = await fetch(`${baseReleaseUrl}/styles.css`);
+      if (stylesRes.ok) {
+        stylesCss = await stylesRes.text();
+      } else {
+        const rawStylesRes = await fetch(`https://raw.githubusercontent.com/${cleanRepo}/HEAD/styles.css`);
+        if (rawStylesRes.ok) stylesCss = await rawStylesRes.text();
+      }
+    } catch (_) {}
+
+    return {
+      manifest,
+      mainJs,
+      stylesCss,
+      repo: cleanRepo
+    };
+  }
+
+  // Check for updates across all converted modules
+  async checkForModuleUpdates(notify = true) {
+    const converted = this.moduleSettings.convertedModules || {};
+    const moduleIds = Object.keys(converted);
+    if (moduleIds.length === 0) {
+      if (notify) new Notice("No converted modules found to check.");
+      return 0;
+    }
+
+    let updatesFound = 0;
+    for (const id of moduleIds) {
+      const item = converted[id];
+      if (!item || !item.repo) continue;
+
+      try {
+        const manifestRes = await fetch(`https://raw.githubusercontent.com/${item.repo}/HEAD/manifest.json`);
+        if (!manifestRes.ok) continue;
+        const remoteManifest = await manifestRes.json();
+        const latestVer = remoteManifest.version;
+        if (latestVer) {
+          item.latestVersion = latestVer;
+          item.lastCheckedAt = Date.now();
+          if (this.compareSemVer(latestVer, item.version) > 0) {
+            item.hasUpdate = true;
+            updatesFound++;
+          } else {
+            item.hasUpdate = false;
+          }
+        }
+      } catch (e) {
+        console.warn(`[WorkflowManager] Update check failed for ${id}:`, e);
+      }
+    }
+
+    await this.saveSettings();
+
+    if (notify) {
+      if (updatesFound > 0) {
+        new Notice(`Workflow Manager: ${updatesFound} module update(s) available!`);
+      } else {
+        new Notice("✓ All converted modules are up to date.");
+      }
+    }
+    return updatesFound;
+  }
+
+  // Update a converted module to its latest release
+  async updateConvertedModule(pluginId) {
+    const item = this.moduleSettings.convertedModules?.[pluginId];
+    if (!item) throw new Error(`Converted module ${pluginId} not found in tracking manifest.`);
+    if (!item.repo) throw new Error(`No repository registered for ${pluginId}.`);
+
+    const assets = await this.fetchRemotePluginAssets(item.repo);
+    await this.convertPluginToModule(pluginId, {
+      remoteAssets: assets,
+      repo: item.repo,
+      source: item.sourceType || "community"
+    });
+
+    item.version = assets.manifest.version || item.latestVersion;
+    item.latestVersion = item.version;
+    item.hasUpdate = false;
+    item.lastCheckedAt = Date.now();
+    await this.saveSettings();
+
+    return item;
+  }
+
+  compareSemVer(v1, v2) {
+    if (!v1 || !v2) return 0;
+    const p1 = String(v1).replace(/^v/, "").split(".").map(Number);
+    const p2 = String(v2).replace(/^v/, "").split(".").map(Number);
+    for (let i = 0; i < Math.max(p1.length, p2.length); i++) {
+      const num1 = p1[i] || 0;
+      const num2 = p2[i] || 0;
+      if (num1 > num2) return 1;
+      if (num1 < num2) return -1;
+    }
+    return 0;
   }
 
   async loadSettings() {

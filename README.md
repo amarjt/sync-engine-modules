@@ -10,6 +10,7 @@ A curated, modular collection of high-performance modules for the Obsidian [Sync
 | :--- | :--- | :--- |
 | **[Drive Attachments](modules/drive-attachments.js)** | Offload pasted and dropped image, video, and audio attachments directly to Google Drive via official Google OAuth device code authorization, with markdown link insertion and inline previews. | `paperclip` |
 | **[Workflow & Plugin Manager](modules/workflow-manager.js)** | Dynamic workflow-based plugin & module control inspired by [Better Add-on Manager (BPM)](https://github.com/eondrcode/obsidian-manager). Synchronizes plugin states with Obsidian workspaces, enables delayed startup acceleration, and converts installed plugins to Sync Engine modules. | `layout-grid` |
+| **[Bases Visuals & Pagination](modules/bases-visuals.js)** | All-in-one enhancement for Obsidian Bases: community Bases Visuals (Notion pill colors & conditional formatting), universal View Tabs for standalone & transcluded bases, right-tools collapse toggle, and immediate record pagination. | `layout-grid` |
 
 ---
 
