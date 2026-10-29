@@ -1,5 +1,16 @@
 [
   {
+    "id": "bases-visuals",
+    "name": "Bases Visuals & Pagination",
+    "version": "1.2.1",
+    "description": "Enhances Obsidian Bases with community Bases Visuals integration, universal View Tabs for standalone & embedded bases, right-tools collapse toggle, and interactive record pagination.",
+    "icon": "layout-grid",
+    "main": "https://raw.githubusercontent.com/amarjt/sync-engine-modules/main/modules/bases-visuals.js",
+    "minPluginVersion": "3.3.0",
+    "integrity": "a15603c683f0726d5b25ac3f22444171a38ff6f47a799166522726d06dc68e20",
+    "readme": "https://github.com/amarjt/sync-engine-modules"
+  },
+  {
     "id": "drive-attachments",
     "name": "Drive Attachments",
     "version": "1.0.0",
@@ -13,12 +24,12 @@
   {
     "id": "workflow-manager",
     "name": "Workflow & Plugin Manager",
-    "version": "1.0.10",
+    "version": "1.1.0",
     "description": "Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.",
     "icon": "layout-grid",
     "main": "https://raw.githubusercontent.com/amarjt/sync-engine-modules/main/modules/workflow-manager.js",
     "minPluginVersion": "3.3.0",
-    "integrity": "b74058d464cc115a35e60ae269bc0094072df4f9e7ba48d2a6260673629aa443",
+    "integrity": "35cbc683990b55fcfce9d2dfc9bbe50cfa65c60bac7bead516a7a7f176dc0407",
     "readme": "https://github.com/amarjt/sync-engine-modules"
   }
 ]
