@@ -2,7 +2,7 @@
 name: Workflow & Plugin Manager
 icon: layout-grid
 description: Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.
-version: 1.2.2
+version: 1.2.3
 readme: https://github.com/amarjt/sync-engine-modules
 */
 
@@ -2749,14 +2749,12 @@ class WorkflowManagerView extends (ItemView || View || class {}) {
     contentEl.empty();
     contentEl.addClass("manager-view-container");
 
-    // Suppress native view-header, view-header-title-container, and purge Commander buttons
+    // Suppress native view-header and purge Commander buttons
     try {
       const viewHeader = containerEl?.querySelector(".view-header");
       if (viewHeader) {
         viewHeader.style.setProperty("display", "none", "important");
       }
-      const titleContainers = containerEl?.querySelectorAll(".view-header-title-container");
-      titleContainers?.forEach((tc) => tc.style.setProperty("display", "none", "important"));
       const cmdrBtns = containerEl?.querySelectorAll(".cmdr, .cmdr-page-header, .cmdr-adder");
       cmdrBtns?.forEach((btn) => btn.remove());
     } catch (_) {}
@@ -3591,11 +3589,7 @@ body.is-workflow-manager-popout-win .view-header {
     padding: 0 !important;
 }
 
-/* Explicitly hide view-header-title-container and its fade variants */
-.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] .view-header-title-container,
-.workspace-leaf-content:has(.manager-view-container) .view-header-title-container,
-.workspace-leaf:has([data-type="workflow-manager-dashboard-view"]) .view-header-title-container,
-.workspace-tabs.is-popout-manager-tabs .view-header-title-container,
+/* Explicitly hide view-header-title-container only for workflow manager in new window */
 body.is-workflow-manager-popout-win .view-header-title-container,
 body.is-workflow-manager-popout-win .view-header-title-container.mod-at-start.mod-fade.mod-at-end {
     display: none !important;
@@ -3610,20 +3604,41 @@ body.is-workflow-manager-popout-win .view-header-title-container.mod-at-start.mo
     display: none !important;
 }
 
-/* Popout Window: Settings Panel Mode (Strip Tab Bar & New Tab Buttons only for popout manager) */
-.workspace-tabs.is-popout-manager-tabs > .workspace-tab-header-container {
+/* Popout Window: Settings Panel Mode (Strip Tab Bar & Position below Titlebar without overlapping) */
+body.is-workflow-manager-popout-win .workspace-tabs.is-popout-manager-tabs > .workspace-tab-header-container {
     display: none !important;
 }
-.workspace-tabs.is-popout-manager-tabs {
+body.is-workflow-manager-popout-win .workspace-tabs.is-popout-manager-tabs {
     border-top: none !important;
-    padding-top: 0 !important;
+    padding-top: calc(var(--header-height, 40px) - 1px) !important;
+    box-sizing: border-box !important;
+    height: 100% !important;
 }
-.workspace-tabs.is-popout-manager-tabs > .workspace-tab-container {
+body.is-workflow-manager-popout-win:not(.is-hidden-frameless) .workspace-tabs.is-popout-manager-tabs {
+    padding-top: var(--titlebar-height, 30px) !important;
+}
+body.is-workflow-manager-popout-win .workspace-tabs.is-popout-manager-tabs > .workspace-tab-container {
     height: 100% !important;
     padding: 0 !important;
 }
 
-/* Enable visibility and styling for window titlebar-text in popout window */
+/* Enable titlebar styling and visibility strictly in popout window */
+body.is-workflow-manager-popout-win .titlebar {
+    display: flex !important;
+    visibility: visible !important;
+    height: calc(var(--header-height, 40px) - 1px) !important;
+    background: var(--background-secondary) !important;
+    border-bottom: 1px solid var(--background-modifier-border) !important;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    width: 100% !important;
+    z-index: 100 !important;
+}
+body.is-workflow-manager-popout-win:not(.is-hidden-frameless) .titlebar {
+    height: var(--titlebar-height, 30px) !important;
+}
 body.is-workflow-manager-popout-win .titlebar .titlebar-text,
 body.is-workflow-manager-popout-win .titlebar-text {
     display: flex !important;
