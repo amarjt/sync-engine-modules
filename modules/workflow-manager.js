@@ -2,7 +2,7 @@
 name: Workflow & Plugin Manager
 icon: layout-grid
 description: Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.
-version: 1.2.1
+version: 1.2.2
 readme: https://github.com/amarjt/sync-engine-modules
 */
 
@@ -1074,17 +1074,6 @@ class WorkflowManagerDashboardRenderer {
     obsPluginsBtn.createSpan({ text: "Community Plugins" });
     obsPluginsBtn.addEventListener("click", () => {
       this.openObsidianSetting("community-plugins");
-    });
-
-    const syncEngineBtn = quickLinks.createEl("button", {
-      cls: "manager-quicklink-btn",
-      attr: { "aria-label": "Open Sync Engine Settings" }
-    });
-    if (typeof setIcon === "function") setIcon(syncEngineBtn, "settings");
-    else syncEngineBtn.setText("⚙️");
-    syncEngineBtn.createSpan({ text: "Sync Engine" });
-    syncEngineBtn.addEventListener("click", () => {
-      this.openObsidianSetting("sync-engine");
     });
   }
 
@@ -2760,12 +2749,14 @@ class WorkflowManagerView extends (ItemView || View || class {}) {
     contentEl.empty();
     contentEl.addClass("manager-view-container");
 
-    // Suppress native view-header and purge any external button injections (e.g. Commander / cmdr)
+    // Suppress native view-header, view-header-title-container, and purge Commander buttons
     try {
       const viewHeader = containerEl?.querySelector(".view-header");
       if (viewHeader) {
-        viewHeader.style.display = "none";
+        viewHeader.style.setProperty("display", "none", "important");
       }
+      const titleContainers = containerEl?.querySelectorAll(".view-header-title-container");
+      titleContainers?.forEach((tc) => tc.style.setProperty("display", "none", "important"));
       const cmdrBtns = containerEl?.querySelectorAll(".cmdr, .cmdr-page-header, .cmdr-adder");
       cmdrBtns?.forEach((btn) => btn.remove());
     } catch (_) {}
@@ -2783,6 +2774,22 @@ class WorkflowManagerView extends (ItemView || View || class {}) {
         if (contentEl.ownerDocument?.body) {
           contentEl.ownerDocument.body.addClass("is-workflow-manager-popout-win");
         }
+
+        // Enable visibility and set text for window titlebar-text
+        try {
+          const doc = contentEl.ownerDocument;
+          const titlebarText = doc?.querySelector(".titlebar .titlebar-text, .titlebar-text");
+          if (titlebarText) {
+            titlebarText.style.setProperty("display", "flex", "important");
+            titlebarText.style.setProperty("visibility", "visible", "important");
+            titlebarText.style.setProperty("opacity", "1", "important");
+            if (!titlebarText.textContent || !titlebarText.textContent.trim()) {
+              titlebarText.textContent = "Workflow & Plugin Manager";
+            }
+          }
+          const docTitleContainers = doc?.querySelectorAll(".view-header-title-container");
+          docTitleContainers?.forEach((el) => el.style.setProperty("display", "none", "important"));
+        } catch (_) {}
       }
     } catch (_) {}
 
@@ -3107,7 +3114,7 @@ body.is-workflow-manager-popout-win .manager-view-container .manager-modal-shell
     display: flex !important;
     flex-direction: column !important;
     gap: 8px !important;
-    padding: 16px 20px 8px 20px !important;
+    padding: 8px 20px !important;
     background: var(--background-primary) !important;
     border-bottom: 1px solid var(--background-modifier-border) !important;
     flex-shrink: 0 !important;
@@ -3571,9 +3578,10 @@ body.is-workflow-manager-popout-win .manager-view-container .manager-modal-shell
     background: var(--interactive-accent-hover);
 }
 
-/* Strip native view-header and eliminate Commander action injections */
+/* Strip native view-header, view-header-title-container and eliminate Commander action injections */
 .workspace-leaf-content[data-type="workflow-manager-dashboard-view"] > .view-header,
-.workspace-leaf-content:has(.manager-view-container) > .view-header {
+.workspace-leaf-content:has(.manager-view-container) > .view-header,
+body.is-workflow-manager-popout-win .view-header {
     display: none !important;
 }
 
@@ -3581,6 +3589,16 @@ body.is-workflow-manager-popout-win .manager-view-container .manager-modal-shell
 .workspace-leaf-content:has(.manager-view-container) > .view-content {
     height: 100% !important;
     padding: 0 !important;
+}
+
+/* Explicitly hide view-header-title-container and its fade variants */
+.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] .view-header-title-container,
+.workspace-leaf-content:has(.manager-view-container) .view-header-title-container,
+.workspace-leaf:has([data-type="workflow-manager-dashboard-view"]) .view-header-title-container,
+.workspace-tabs.is-popout-manager-tabs .view-header-title-container,
+body.is-workflow-manager-popout-win .view-header-title-container,
+body.is-workflow-manager-popout-win .view-header-title-container.mod-at-start.mod-fade.mod-at-end {
+    display: none !important;
 }
 
 .workspace-leaf-content[data-type="workflow-manager-dashboard-view"] .cmdr,
@@ -3603,6 +3621,20 @@ body.is-workflow-manager-popout-win .manager-view-container .manager-modal-shell
 .workspace-tabs.is-popout-manager-tabs > .workspace-tab-container {
     height: 100% !important;
     padding: 0 !important;
+}
+
+/* Enable visibility and styling for window titlebar-text in popout window */
+body.is-workflow-manager-popout-win .titlebar .titlebar-text,
+body.is-workflow-manager-popout-win .titlebar-text {
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    color: var(--text-normal) !important;
+    font-size: var(--font-ui-smaller, 12px) !important;
+    font-weight: 500 !important;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
 }
 body.is-workflow-manager-popout-win .manager-header {
     -webkit-app-region: drag;
