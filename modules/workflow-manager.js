@@ -2,7 +2,7 @@
 name: Workflow & Plugin Manager
 icon: layout-grid
 description: Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.
-version: 1.2.0
+version: 1.2.1
 readme: https://github.com/amarjt/sync-engine-modules
 */
 
@@ -2747,10 +2747,28 @@ class WorkflowManagerView extends (ItemView || View || class {}) {
     return "layout-grid";
   }
 
+  // Suppress external action injections (e.g. Commander / cmdr pageHeader buttons)
+  addAction(icon, title, callback) {
+    const doc = this.containerEl?.ownerDocument || (typeof document !== "undefined" ? document : null);
+    const dummy = doc ? doc.createElement("div") : {};
+    if (dummy.style) dummy.style.display = "none";
+    return dummy;
+  }
+
   async onOpen() {
-    const { contentEl } = this;
+    const { contentEl, containerEl } = this;
     contentEl.empty();
     contentEl.addClass("manager-view-container");
+
+    // Suppress native view-header and purge any external button injections (e.g. Commander / cmdr)
+    try {
+      const viewHeader = containerEl?.querySelector(".view-header");
+      if (viewHeader) {
+        viewHeader.style.display = "none";
+      }
+      const cmdrBtns = containerEl?.querySelectorAll(".cmdr, .cmdr-page-header, .cmdr-adder");
+      cmdrBtns?.forEach((btn) => btn.remove());
+    } catch (_) {}
 
     // Determine strictly if this view is in a separate popout window
     try {
@@ -3551,6 +3569,27 @@ body.is-workflow-manager-popout-win .manager-view-container .manager-modal-shell
 
 .manager-action-btn.is-cta:hover {
     background: var(--interactive-accent-hover);
+}
+
+/* Strip native view-header and eliminate Commander action injections */
+.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] > .view-header,
+.workspace-leaf-content:has(.manager-view-container) > .view-header {
+    display: none !important;
+}
+
+.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] > .view-content,
+.workspace-leaf-content:has(.manager-view-container) > .view-content {
+    height: 100% !important;
+    padding: 0 !important;
+}
+
+.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] .cmdr,
+.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] .cmdr-page-header,
+.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] .cmdr-adder,
+.workspace-leaf-content:has(.manager-view-container) .cmdr,
+.workspace-leaf-content:has(.manager-view-container) .cmdr-page-header,
+.workspace-leaf-content:has(.manager-view-container) .cmdr-adder {
+    display: none !important;
 }
 
 /* Popout Window: Settings Panel Mode (Strip Tab Bar & New Tab Buttons only for popout manager) */
