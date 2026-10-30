@@ -2,7 +2,7 @@
 name: Workflow & Plugin Manager
 icon: layout-grid
 description: Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.
-version: 1.2.4
+version: 1.2.3
 readme: https://github.com/amarjt/sync-engine-modules
 */
 
@@ -2749,75 +2749,47 @@ class WorkflowManagerView extends (ItemView || View || class {}) {
     contentEl.empty();
     contentEl.addClass("manager-view-container");
 
-    const mainWindowDoc = this.app?.workspace?.containerEl?.ownerDocument || (typeof document !== "undefined" ? document : null);
-    const viewDoc = contentEl.ownerDocument || containerEl?.ownerDocument || mainWindowDoc;
-
-    // Strict Popout Check:
-    // A view is ONLY in a popout window if its document is physically distinct from the main Obsidian window
-    // AND its leaf root is a WorkspaceWindow (type === "window" or workspace-window class).
-    // Under NO circumstances may any view sharing mainWindowDoc (e.g. sidebar or main tabs) be treated as a popout!
-    const root = typeof this.leaf?.getRoot === "function" ? this.leaf.getRoot() : null;
-    const isPopoutRoot = Boolean(root && (root.type === "window" || root.containerEl?.classList.contains("workspace-window")));
-    const isDifferentDoc = Boolean(viewDoc && mainWindowDoc && viewDoc !== mainWindowDoc);
-    const isPopout = isDifferentDoc && isPopoutRoot;
-
-    // Purge any Commander buttons inside this view's container only
+    // Suppress native view-header and purge Commander buttons
     try {
+      const viewHeader = containerEl?.querySelector(".view-header");
+      if (viewHeader) {
+        viewHeader.style.setProperty("display", "none", "important");
+      }
       const cmdrBtns = containerEl?.querySelectorAll(".cmdr, .cmdr-page-header, .cmdr-adder");
       cmdrBtns?.forEach((btn) => btn.remove());
     } catch (_) {}
 
-    // Clean up any legacy or rogue popout styles/classes that may have leaked to mainWindowDoc
-    if (mainWindowDoc?.body) {
-      mainWindowDoc.body.removeClass("is-workflow-manager-popout-win");
-      mainWindowDoc.body.removeClass("is-popout-manager-tabs");
-    }
+    // Determine strictly if this view is in a separate popout window
     try {
-      if (mainWindowDoc) {
-        const mainTitlebarText = mainWindowDoc.querySelector(".titlebar .titlebar-text, .titlebar-text");
-        if (mainTitlebarText) {
-          mainTitlebarText.style.removeProperty("display");
-          mainTitlebarText.style.removeProperty("visibility");
-          mainTitlebarText.style.removeProperty("opacity");
+      const isPopoutLeaf = Boolean(this.leaf && typeof this.leaf.getRoot === "function" && this.leaf.getRoot() !== this.app?.workspace?.rootSplit);
+      const isDifferentWindow = Boolean(contentEl.ownerDocument && contentEl.ownerDocument !== (this.app?.workspace?.containerEl?.ownerDocument || document));
+      const isPopout = isPopoutLeaf || isDifferentWindow;
+
+      if (isPopout) {
+        if (this.leaf?.parent?.containerEl) {
+          this.leaf.parent.containerEl.addClass("is-popout-manager-tabs");
         }
-        const mainTitleContainers = mainWindowDoc.querySelectorAll(".view-header-title-container");
-        mainTitleContainers.forEach((el) => {
-          el.style.removeProperty("display");
-        });
+        if (contentEl.ownerDocument?.body) {
+          contentEl.ownerDocument.body.addClass("is-workflow-manager-popout-win");
+        }
+
+        // Enable visibility and set text for window titlebar-text
+        try {
+          const doc = contentEl.ownerDocument;
+          const titlebarText = doc?.querySelector(".titlebar .titlebar-text, .titlebar-text");
+          if (titlebarText) {
+            titlebarText.style.setProperty("display", "flex", "important");
+            titlebarText.style.setProperty("visibility", "visible", "important");
+            titlebarText.style.setProperty("opacity", "1", "important");
+            if (!titlebarText.textContent || !titlebarText.textContent.trim()) {
+              titlebarText.textContent = "Workflow & Plugin Manager";
+            }
+          }
+          const docTitleContainers = doc?.querySelectorAll(".view-header-title-container");
+          docTitleContainers?.forEach((el) => el.style.setProperty("display", "none", "important"));
+        } catch (_) {}
       }
     } catch (_) {}
-
-    if (isPopout) {
-      if (this.leaf?.parent?.containerEl) {
-        this.leaf.parent.containerEl.addClass("is-popout-manager-tabs");
-      }
-      if (viewDoc.body) {
-        viewDoc.body.addClass("is-workflow-manager-popout-win");
-      }
-
-      // Configure window titlebar in popout window ONLY
-      try {
-        const titlebarText = viewDoc.querySelector(".titlebar .titlebar-text, .titlebar-text");
-        if (titlebarText) {
-          titlebarText.style.setProperty("display", "flex", "important");
-          titlebarText.style.setProperty("visibility", "visible", "important");
-          titlebarText.style.setProperty("opacity", "1", "important");
-          if (!titlebarText.textContent || !titlebarText.textContent.trim()) {
-            titlebarText.textContent = "Workflow & Plugin Manager";
-          }
-        }
-        const docTitleContainers = viewDoc.querySelectorAll(".view-header-title-container");
-        docTitleContainers?.forEach((el) => el.style.setProperty("display", "none", "important"));
-      } catch (_) {}
-
-      // Suppress native view-header inside this popout window only
-      try {
-        const viewHeader = containerEl?.querySelector(".view-header");
-        if (viewHeader) {
-          viewHeader.style.setProperty("display", "none", "important");
-        }
-      } catch (_) {}
-    }
 
     // isModalHost = false: Popout window stays open and focused when opening settings
     this.renderer.mount(contentEl, null, null, false);
@@ -2828,15 +2800,9 @@ class WorkflowManagerView extends (ItemView || View || class {}) {
       if (this.leaf?.parent?.containerEl) {
         this.leaf.parent.containerEl.removeClass("is-popout-manager-tabs");
       }
-      const viewDoc = this.contentEl?.ownerDocument;
-      if (viewDoc?.body) {
-        viewDoc.body.removeClass("is-workflow-manager-popout-win");
-        viewDoc.body.removeClass("is-workflow-manager-popout");
-      }
-      const mainWindowDoc = this.app?.workspace?.containerEl?.ownerDocument || (typeof document !== "undefined" ? document : null);
-      if (mainWindowDoc?.body) {
-        mainWindowDoc.body.removeClass("is-workflow-manager-popout-win");
-        mainWindowDoc.body.removeClass("is-popout-manager-tabs");
+      if (this.contentEl?.ownerDocument?.body) {
+        this.contentEl.ownerDocument.body.removeClass("is-workflow-manager-popout-win");
+        this.contentEl.ownerDocument.body.removeClass("is-workflow-manager-popout");
       }
     } catch (_) {}
     this.renderer.unmount();
@@ -3610,13 +3576,15 @@ body.is-workflow-manager-popout-win .manager-view-container .manager-modal-shell
     background: var(--interactive-accent-hover);
 }
 
-/* Strip native view-header only in dedicated popout window; suppress Commander injections everywhere */
+/* Strip native view-header, view-header-title-container and eliminate Commander action injections */
+.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] > .view-header,
+.workspace-leaf-content:has(.manager-view-container) > .view-header,
 body.is-workflow-manager-popout-win .view-header {
     display: none !important;
 }
 
-body.is-workflow-manager-popout-win .workspace-leaf-content[data-type="workflow-manager-dashboard-view"] > .view-content,
-body.is-workflow-manager-popout-win .workspace-leaf-content:has(.manager-view-container) > .view-content {
+.workspace-leaf-content[data-type="workflow-manager-dashboard-view"] > .view-content,
+.workspace-leaf-content:has(.manager-view-container) > .view-content {
     height: 100% !important;
     padding: 0 !important;
 }
@@ -4110,25 +4078,17 @@ class WorkflowManagerModule {
     // Always ensure view is registered in app.viewRegistry
     this.registerDashboardView();
 
-    // Check if view is already open in an existing POPOUT window (ignore leaves in main window/sidebars)
-    const mainWindowDoc = app.workspace.containerEl?.ownerDocument || (typeof document !== "undefined" ? document : null);
-    let existingPopoutLeaf = null;
+    // Check if view is already open in any leaf
+    let targetLeaf = null;
     app.workspace.iterateAllLeaves((leaf) => {
       if (leaf.view && typeof leaf.view.getViewType === "function" && leaf.view.getViewType() === WORKFLOW_MANAGER_VIEW_TYPE) {
-        const root = typeof leaf.getRoot === "function" ? leaf.getRoot() : null;
-        const isPopout = Boolean(
-          (root && (root.type === "window" || root.containerEl?.classList.contains("workspace-window"))) ||
-          (leaf.view.containerEl?.ownerDocument && mainWindowDoc && leaf.view.containerEl.ownerDocument !== mainWindowDoc)
-        );
-        if (isPopout) {
-          existingPopoutLeaf = leaf;
-        }
+        targetLeaf = leaf;
       }
     });
 
-    if (existingPopoutLeaf) {
-      app.workspace.revealLeaf(existingPopoutLeaf);
-      return existingPopoutLeaf;
+    if (targetLeaf) {
+      app.workspace.revealLeaf(targetLeaf);
+      return targetLeaf;
     }
 
     // Open native popout window
