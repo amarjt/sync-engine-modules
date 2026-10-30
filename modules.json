@@ -35,12 +35,12 @@
   {
     "id": "tabsdown",
     "name": "Tabsdown (Performance Patched)",
-    "version": "1.6.2",
+    "version": "1.6.3",
     "description": "Accessible tabbed blocks for Markdown with keystroke isolation, scoped DOM observation, zero layout thrashing, native Tab-Panels styling, and Command Palette inserters.",
     "icon": "panel-top",
     "main": "https://raw.githubusercontent.com/amarjt/sync-engine-modules/main/modules/tabsdown.js",
     "minPluginVersion": "3.3.0",
-    "integrity": "cbee7e71415a7f36360f91b7a90bfde98987cf1c46d8253a4f90c1680519005b",
+    "integrity": "c76267edd8efea4225454f9b49c7e301589f7db2f8b802effcd8e6c1cd28ff5e",
     "readme": "https://github.com/amarjt/sync-engine-modules"
   }
 ]
