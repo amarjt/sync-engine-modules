@@ -24,12 +24,12 @@
   {
     "id": "workflow-manager",
     "name": "Workflow & Plugin Manager",
-    "version": "1.2.4",
+    "version": "1.2.3",
     "description": "Control Obsidian plugins and Sync Engine modules by workflow profiles, sync layouts with workspaces, optimize boot times, and convert plugins to modules.",
-    "icon": "blocks",
+    "icon": "layout-grid",
     "main": "https://raw.githubusercontent.com/amarjt/sync-engine-modules/main/modules/workflow-manager.js",
     "minPluginVersion": "3.3.0",
-    "integrity": "6fb8678c9de1913b39f48ea69760cfc15c1c55ac881a1dd6f2db6882096fb6f3",
+    "integrity": "4e5164838224d010197768fbfb6bda1e90bae1da003b79b091d4758965a7a4ab",
     "readme": "https://github.com/amarjt/sync-engine-modules"
   },
   {
